@@ -415,3 +415,25 @@ fn two_near_ties_are_not_resolved_by_elimination() {
 
     assert!(assign_rows(&rows, &candidates, &MatchConfig::default()).is_empty());
 }
+
+#[test]
+fn a_leading_edge_artifact_still_matches_the_right_player() {
+    // The crop's left edge sometimes adds a glyph that normalization keeps
+    // because it reads as a letter.
+    let candidates = build(&[("@Soa#1", 274_808, 274_808), ("@Delta Four#2", 38_930, 38_930)]);
+    let rows = vec![row(0, Some("ISOA"), Some(274_808), None)];
+
+    let result = assign_rows(&rows, &candidates, &MatchConfig::default());
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "@Soa#1");
+}
+
+#[test]
+fn dropping_a_leading_glyph_does_not_rescue_an_unrelated_read() {
+    // The remainder has to match exactly; a near-miss must stay unassigned.
+    let candidates = build(&[("@Echo Five#1", 397_263, 397_263)]);
+    let rows = vec![row(0, Some("XQZRV"), None, None)];
+
+    assert!(assign_rows(&rows, &candidates, &MatchConfig::default()).is_empty());
+}

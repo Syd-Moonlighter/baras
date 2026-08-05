@@ -71,6 +71,14 @@ fn name_score(observed: &str, candidate: &PlayerCandidate) -> Option<f32> {
         return Some(1.0);
     }
 
+    // The crop's left edge sometimes yields a stray glyph that normalization
+    // keeps because it reads as a letter — `ISOA` for `SOA`. Only an exact match
+    // on the remainder counts, so this can never inflate the score of a
+    // genuinely different candidate.
+    if observed.len() > MIN_OCR_NAME_CHARS && &observed[1..] == target {
+        return Some(1.0);
+    }
+
     // `normalize` yields ASCII alphanumerics only, so byte slicing is safe.
     if observed.len() < target.len() {
         Some(similarity(observed, &target[..observed.len()]))
