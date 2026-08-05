@@ -1,0 +1,23 @@
+[package]
+name = "baras-raid-ocr"
+version = "0.1.0"
+edition = "2024"
+
+[lints]
+workspace = true
+
+[dependencies]
+# `query` pulls the DataFusion stack, which recognition has no use for. The app
+# still enables it through its own dependency on baras-core.
+baras-core = { path = "../core", default-features = false }
+baras-overlay = { path = "../overlay" }
+
+ocrs = "0.12"
+# Pinned to the rten major ocrs 0.12 links against — mixing majors gives two
+# incompatible copies of Model and RotatedRect.
+rten = "0.24"
+rten-imageproc = "0.24"
+
+dirs = "6.0.0"
+reqwest = "0.12"
+tracing = { workspace = true }

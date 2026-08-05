@@ -28,6 +28,7 @@
 //! └─────────────────────────────────────────────────────┘
 //! ```
 
+pub mod capture;
 pub mod class_icons;
 pub mod frame;
 pub mod icons;
@@ -113,6 +114,7 @@ pub use overlays::{
     RaidOverlayConfig,
     RaidRegistryAction,
     SwapState,
+    raid_slot_rects,
     AbilityQueueConfig,
     AbilityQueueData,
     AbilityQueueEntry,

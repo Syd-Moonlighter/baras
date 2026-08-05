@@ -56,6 +56,7 @@ pub use raid::{
     RaidOverlay,
     RaidOverlayConfig,
     SwapState,
+    raid_slot_rects,
 };
 pub use ability_queue::{AbilityQueueConfig, AbilityQueueOverlay};
 pub use timers::{AbilityQueueData, AbilityQueueEntry, TimerData, TimerEntry, TimerOverlay};
@@ -66,12 +67,19 @@ pub use timers::{AbilityQueueData, AbilityQueueEntry, TimerData, TimerEntry, Tim
 
 /// Actions that the raid overlay wants to perform on the registry.
 /// These are collected by the overlay and polled by the spawn loop.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum RaidRegistryAction {
     /// Swap two slots
     SwapSlots(u8, u8),
     /// Clear a specific slot
     ClearSlot(u8),
+    /// Captured pixels and overlay-local slot rectangles.
+    DetectNames {
+        started_at: std::time::Instant,
+        image: crate::capture::CapturedImage,
+        slots: Vec<(u8, i32, i32, u32, u32)>,
+        result_tx: std::sync::mpsc::Sender<String>,
+    },
 }
 
 use crate::frame::OverlayFrame;
@@ -264,6 +272,8 @@ pub trait Overlay: 'static {
     fn set_rearrange_mode(&mut self, _enabled: bool) {
         // Default: no-op for non-raid overlays
     }
+
+    fn request_raid_detection(&mut self) {}
 
     /// Take any pending registry actions (raid overlay only).
     /// Returns actions that need to be sent to the service for registry updates.

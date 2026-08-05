@@ -327,6 +327,12 @@ pub trait OverlayPlatform: Sized {
     /// Enable or disable click-through mode
     fn set_click_through(&mut self, enabled: bool);
 
+    /// Route one overlay-local rectangle to click handling instead of click-through or dragging.
+    /// Unsupported platforms may ignore it.
+    fn set_interactive_region(&mut self, region: Option<(i32, i32, u32, u32)>) {
+        let _ = region;
+    }
+
     /// Enable or disable window dragging when interactive
     ///
     /// When drag is disabled but click-through is also disabled, clicks are

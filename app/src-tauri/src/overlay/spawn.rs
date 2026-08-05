@@ -179,6 +179,10 @@ where
                             monitor_y,
                         });
                     }
+                    OverlayCommand::DetectRaidNames => {
+                        overlay.request_raid_detection();
+                        needs_render = true;
+                    }
                     OverlayCommand::Shutdown => return,
                 }
             }
@@ -363,6 +367,13 @@ where
                             }
                         });
                         let _ = response_tx.send(event);
+                    }
+                    OverlayCommand::DetectRaidNames => {
+                        dispatch::Queue::main().exec_sync(move || {
+                            let overlay = unsafe { &mut *overlay_ptr.get() };
+                            overlay.request_raid_detection();
+                        });
+                        needs_render = true;
                     }
                     OverlayCommand::Shutdown => {
                         // Clean up overlay on main thread before returning

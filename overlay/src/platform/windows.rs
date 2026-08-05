@@ -324,6 +324,10 @@ pub struct WindowsOverlay {
     in_resize_corner: bool,
     drag_enabled: bool,
     pending_click: Option<(f32, f32)>,
+    /// Sub-rectangle that stays clickable while click-through is on.
+    interactive_region: Option<(i32, i32, u32, u32)>,
+    // WS_EX_TRANSPARENT is toggled when this changes.
+    region_hot: bool,
     // Drag tracking - uses screen coordinates for stable movement
     drag_start_screen_x: i32,
     drag_start_screen_y: i32,
@@ -510,6 +514,13 @@ impl WindowsOverlay {
             && y > (self.height as i32 - RESIZE_CORNER_SIZE)
     }
 
+    fn is_in_interactive_region(&self, x: i32, y: i32) -> bool {
+        self.interactive_region
+            .is_some_and(|(rx, ry, rw, rh)| {
+                x >= rx && x < rx + rw as i32 && y >= ry && y < ry + rh as i32
+            })
+    }
+
     fn update_extended_style(&self) {
         overlay_log!(
             "HWND={:?}: update_extended_style called, click_through={}",
@@ -518,12 +529,43 @@ impl WindowsOverlay {
         );
         unsafe {
             let mut ex_style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
-            if self.click_through {
+            if self.click_through && !self.region_hot {
                 ex_style |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+            } else if self.click_through {
+                ex_style |= WS_EX_NOACTIVATE;
             }
             overlay_log!("  Setting extended style to {:#x}", ex_style.0);
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style.0 as isize);
             overlay_log!("  SetWindowLongPtrW completed");
+        }
+    }
+
+    /// Update partial click-through from the current cursor position.
+    fn update_region_hot(&mut self) {
+        if self.interactive_region.is_none() {
+            if self.region_hot {
+                self.region_hot = false;
+                self.update_extended_style();
+            }
+            return;
+        }
+
+        if !self.click_through {
+            return;
+        }
+
+        let mut pt = POINT::default();
+        if unsafe { GetCursorPos(&mut pt) }.is_err() {
+            return;
+        }
+
+        let lx = pt.x - self.x;
+        let ly = pt.y - self.y;
+        let inside = self.is_in_interactive_region(lx, ly);
+
+        if inside != self.region_hot {
+            self.region_hot = inside;
+            self.update_extended_style();
         }
     }
 }
@@ -625,6 +667,8 @@ impl OverlayPlatform for WindowsOverlay {
             in_resize_corner: false,
             drag_enabled: true,
             pending_click: None,
+            interactive_region: None,
+            region_hot: false,
             drag_start_screen_x: 0,
             drag_start_screen_y: 0,
             drag_start_win_x: abs_x,
@@ -732,6 +776,7 @@ impl OverlayPlatform for WindowsOverlay {
             self.click_through
         );
         self.click_through = enabled;
+        self.region_hot = false;
         self.update_extended_style();
 
         if enabled {
@@ -744,6 +789,17 @@ impl OverlayPlatform for WindowsOverlay {
             self.hwnd,
             if enabled { "LOCKED" } else { "INTERACTIVE" }
         );
+    }
+
+    fn set_interactive_region(&mut self, region: Option<(i32, i32, u32, u32)>) {
+        if self.interactive_region == region {
+            return;
+        }
+        self.interactive_region = region;
+        if region.is_none() && self.region_hot {
+            self.region_hot = false;
+            self.update_extended_style();
+        }
     }
 
     fn set_drag_enabled(&mut self, enabled: bool) {
@@ -793,6 +849,8 @@ impl OverlayPlatform for WindowsOverlay {
     }
 
     fn poll_events(&mut self) -> bool {
+        self.update_region_hot();
+
         unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, Some(self.hwnd), 0, 0, PM_REMOVE) != false {
@@ -804,6 +862,17 @@ impl OverlayPlatform for WindowsOverlay {
 
                 // Handle mouse messages for drag/resize
                 match msg.message {
+                    WM_LBUTTONDOWN if self.click_through && self.region_hot => {
+                        let x = (msg.lParam.0 & 0xFFFF) as i16 as i32;
+                        let y = ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32;
+                        overlay_log!(
+                            "HWND={:?}: WM_LBUTTONDOWN at ({},{}) in interactive region",
+                            self.hwnd,
+                            x,
+                            y
+                        );
+                        self.pending_click = Some((x as f32, y as f32));
+                    }
                     WM_LBUTTONDOWN if !self.click_through => {
                         let x = (msg.lParam.0 & 0xFFFF) as i16 as i32;
                         let y = ((msg.lParam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -818,7 +887,10 @@ impl OverlayPlatform for WindowsOverlay {
                         // Resize and drag are only available when drag_enabled (move mode)
                         // When drag_enabled=false (rearrange mode), all clicks go to the overlay
                         if self.drag_enabled {
-                            if self.is_in_resize_corner(x, y) {
+                            if self.is_in_interactive_region(x, y) {
+                                overlay_log!("  Click is inside the interactive region");
+                                self.pending_click = Some((x as f32, y as f32));
+                            } else if self.is_in_resize_corner(x, y) {
                                 overlay_log!("  Starting resize");
                                 self.is_resizing = true;
                                 self.pending_width = self.width;

@@ -22,6 +22,39 @@ use tauri::{AppHandle, Emitter};
 use super::{AreaVisitInfo, CombatData, LogFileInfo, ServiceCommand, SessionInfo};
 use crate::state::SharedState;
 
+const MAX_OCR_ROSTER_AGE_MINUTES: i64 = 12 * 60;
+
+fn roster_is_recent(last_event: Option<chrono::NaiveDateTime>, now: chrono::NaiveDateTime) -> bool {
+    let Some(last_event) = last_event else {
+        return false;
+    };
+    let age = now.signed_duration_since(last_event).num_minutes();
+    (-5..=MAX_OCR_ROSTER_AGE_MINUTES).contains(&age)
+}
+
+#[cfg(test)]
+mod raid_detection_tests {
+    use super::*;
+
+    #[test]
+    fn old_or_missing_logs_do_not_supply_ocr_candidates() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 8, 5)
+            .unwrap()
+            .and_hms_opt(10, 0, 0)
+            .unwrap();
+
+        assert!(!roster_is_recent(None, now));
+        assert!(roster_is_recent(
+            Some(now - chrono::Duration::minutes(30)),
+            now
+        ));
+        assert!(!roster_is_recent(
+            Some(now - chrono::Duration::hours(13)),
+            now
+        ));
+    }
+}
+
 /// Handle to communicate with the combat service and query state
 #[derive(Clone)]
 pub struct ServiceHandle {
@@ -402,6 +435,108 @@ impl ServiceHandle {
     pub async fn remove_raid_slot(&self, slot: u8) {
         self.shared.raid_registry.lock().unwrap_or_else(|p| p.into_inner()).remove_slot(slot);
         self.refresh_raid_frames().await;
+    }
+
+    /// Current-area roster for OCR. Names identify; health only supports.
+    pub async fn raid_detection_candidates(&self) -> Vec<baras_core::raid_detect::PlayerCandidate> {
+        use baras_core::raid_detect::CandidateSet;
+
+        if !self.shared.is_live_tailing.load(Ordering::SeqCst) {
+            return Vec::new();
+        }
+        let last_event = self
+            .shared
+            .directory_index
+            .read()
+            .await
+            .newest_file()
+            .and_then(|file| file.last_event_time);
+        if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
+            return Vec::new();
+        }
+
+        let session_guard = self.shared.session.read().await;
+        let Some(session) = session_guard.as_ref() else {
+            return Vec::new();
+        };
+        let session = session.read().await;
+        let Some(cache) = session.session_cache.as_ref() else {
+            return Vec::new();
+        };
+        let mut set = CandidateSet::new();
+        let area_started = cache.current_area.entered_at;
+        for player in cache.player_disciplines.values() {
+            let Some(last_seen) = player.last_seen_at else {
+                continue;
+            };
+            if area_started.is_some_and(|started| last_seen < started) {
+                continue;
+            }
+            set.observe_raw(
+                player.id,
+                baras_core::context::resolve(player.name),
+                (player.current_hp, player.max_hp),
+                last_seen,
+            );
+        }
+        if let Some(encounter) = cache.current_encounter() {
+            for player in encounter.players.values() {
+                let Some(last_seen) = player.last_seen_at else {
+                    continue;
+                };
+                set.observe_raw(
+                    player.id,
+                    baras_core::context::resolve(player.name),
+                    (player.current_hp, player.max_hp),
+                    last_seen,
+                );
+            }
+        }
+
+        set.candidates()
+    }
+
+    /// Write detection results into the raid registry.
+    pub async fn apply_raid_detection(
+        &self,
+        assignments: Vec<baras_core::raid_detect::RowAssignment>,
+    ) -> usize {
+        let remaining = {
+            let mut registry = self
+                .shared
+                .raid_registry
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            registry.assign_slots(
+                assignments
+                    .into_iter()
+                    .filter_map(|a| {
+                        u8::try_from(a.row)
+                            .ok()
+                            .map(|row| (row, a.entity_id, a.name))
+                    }),
+            );
+            registry.provisional_len()
+        };
+        self.refresh_raid_frames().await;
+        remaining
+    }
+
+    pub async fn apply_provisional_raid_detection(
+        &self,
+        assignments: Vec<(u8, String)>,
+    ) -> (usize, usize) {
+        let counts = {
+            let mut registry = self
+                .shared
+                .raid_registry
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            registry.assign_provisional_slots(assignments);
+            (registry.provisional_len(), registry.registered_len())
+        };
+        self.refresh_raid_frames().await;
+        counts
     }
 
     /// Clear all raid registry slots

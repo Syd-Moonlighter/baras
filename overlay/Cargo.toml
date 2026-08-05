@@ -10,7 +10,7 @@ workspace = true
 default = []
 
 [dependencies]
-baras-core = { path = "../core" }
+baras-core = { path = "../core", default-features = false }
 baras-types = { path = "../types" }
 
 # Rendering (cross-platform)

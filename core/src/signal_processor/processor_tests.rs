@@ -116,6 +116,60 @@ fn signal_type_name(signal: &GameSignal) -> &'static str {
 }
 
 #[test]
+fn discipline_batch_does_not_choose_the_local_player_by_order() {
+    const LOCAL_ID: i64 = 1002;
+    const REMOTE_ID: i64 = 1001;
+
+    let parser = LogParser::new(chrono::Local::now().naive_local());
+    let mut processor = EventProcessor::new();
+    let mut cache = SessionCache::default();
+
+    let enter = "[19:54:00.824] [@Test Alpha#1002|(1.00,2.00,3.00,4.00)|(440917/440917)] [] [] [Event {836045448945472}: EnterCombat {836045448945489}]";
+    let remote_discipline = "[19:54:00.824] [@Test Bravo#1001|(5.00,6.00,7.00,8.00)|(485275/485275)] [] [] [DisciplineChanged {836045448953665}: Shadow {16141082698337403481}/Kinetic Combat {2031339142381622}]";
+    let local_discipline = "[19:54:00.825] [@Test Alpha#1002|(1.00,2.00,3.00,4.00)|(440917/440917)] [] [] [DisciplineChanged {836045448953665}: Sentinel {16141154905109553504}/Watchman {2031339142381614}]";
+    let remote_update = "[19:54:00.830] [@Test Bravo#1001|(5.00,6.00,7.00,8.00)|(400000/485275)] [=] [Force Wave {3414095273394176}] [Event {836045448945472}: AbilityActivate {836045448945479}]";
+
+    let event = parser.parse_line(1, enter).expect("EnterCombat should parse");
+    processor.process_event(event, &mut cache);
+    assert_eq!(cache.player.id, LOCAL_ID);
+    assert!(!cache.player_initialized);
+
+    let event = parser
+        .parse_line(2, remote_discipline)
+        .expect("remote discipline should parse");
+    let (signals, _, _) = processor.process_event(event, &mut cache);
+    assert!(!signals.iter().any(|signal| matches!(
+        signal,
+        GameSignal::PlayerInitialized { .. }
+    )));
+    assert_eq!(cache.player.id, LOCAL_ID);
+    let remote = cache
+        .player_disciplines
+        .get(&REMOTE_ID)
+        .expect("remote player should join the provisional roster");
+    assert_eq!((remote.current_hp, remote.max_hp), (485_275, 485_275));
+
+    let event = parser
+        .parse_line(3, local_discipline)
+        .expect("local discipline should parse");
+    let (signals, _, _) = processor.process_event(event, &mut cache);
+    assert!(signals.iter().any(|signal| matches!(
+        signal,
+        GameSignal::PlayerInitialized { entity_id: LOCAL_ID, .. }
+    )));
+    assert!(cache.player_initialized);
+
+    let roster_seen_at = cache.player_disciplines[&REMOTE_ID].last_seen_at;
+    let event = parser
+        .parse_line(4, remote_update)
+        .expect("health update should parse");
+    processor.process_event(event, &mut cache);
+    let remote = &cache.player_disciplines[&REMOTE_ID];
+    assert_eq!((remote.current_hp, remote.max_hp), (400_000, 485_275));
+    assert_eq!(remote.last_seen_at, roster_seen_at);
+}
+
+#[test]
 fn test_bestia_pull_emits_expected_signals() {
     let fixture_path = Path::new("../integration-tests/fixtures/bestia_pull.txt");
     if !fixture_path.exists() {

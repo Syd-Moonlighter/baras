@@ -215,9 +215,9 @@ impl RaidFrame {
         }
     }
 
-    /// Check if the frame is empty (no player assigned)
+    /// A provisional OCR label still counts as an occupied frame.
     pub fn is_empty(&self) -> bool {
-        self.player_id.is_none()
+        self.name.is_empty()
     }
 
     /// Clear the frame (remove player)
@@ -312,6 +312,12 @@ pub enum InteractionMode {
     Normal, // click_through = true, clicks pass through
     Move,      // click_through = false, drag = move window
     Rearrange, // click_through = false, click = swap slots
+}
+
+impl InteractionMode {
+    fn shows_detect_button(self) -> bool {
+        matches!(self, Self::Move | Self::Rearrange)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -482,6 +488,68 @@ const BASE_WIDTH: f32 = 220.0;
 const BASE_HEIGHT: f32 = 180.0;
 const BASE_GAP: f32 = 4.0;
 const BASE_PADDING: f32 = 8.0;
+const DETECT_BUTTON_EDGE_OVERLAP: f32 = 2.0;
+const DETECT_BUTTON_HIT_PADDING: f32 = 5.0;
+// Give the transparent clear a frame to reach the compositor.
+const BLANK_SETTLE_MS: u64 = 60;
+const DETECTION_MESSAGE_SECS: u64 = 6;
+
+struct RaidSlotGeometry {
+    padding: f32,
+    gap: f32,
+    frame_width: f32,
+    frame_height: f32,
+}
+
+fn raid_slot_geometry(
+    width: u32,
+    height: u32,
+    layout: RaidGridLayout,
+    frame_spacing: f32,
+) -> RaidSlotGeometry {
+    let width = width as f32;
+    let height = height as f32;
+    let columns = layout.columns.max(1) as f32;
+    let rows = layout.rows.max(1) as f32;
+    let scale = ((width / BASE_WIDTH) * (height / BASE_HEIGHT)).sqrt();
+    let padding = BASE_PADDING * scale;
+    let gap = frame_spacing;
+
+    RaidSlotGeometry {
+        padding,
+        gap,
+        frame_width: ((width - 2.0 * padding - (columns - 1.0) * gap) / columns).max(20.0),
+        frame_height: ((height - 2.0 * padding - (rows - 1.0) * gap) / rows).max(20.0),
+    }
+}
+
+/// The slot rectangles used by both the overlay and OCR harness.
+pub fn raid_slot_rects(
+    width: u32,
+    height: u32,
+    layout: RaidGridLayout,
+    frame_spacing: f32,
+) -> Vec<(u8, i32, i32, u32, u32)> {
+    let geometry = raid_slot_geometry(width, height, layout, frame_spacing);
+    let rows = layout.rows.max(1);
+    let capacity = layout.columns.max(1).saturating_mul(rows);
+
+    (0..capacity)
+        .map(|slot| {
+            let col = (slot / rows) as f32;
+            let row = (slot % rows) as f32;
+            let x = geometry.padding + col * (geometry.frame_width + geometry.gap);
+            let y = geometry.padding + row * (geometry.frame_height + geometry.gap);
+            (
+                slot,
+                x.round() as i32,
+                y.round() as i32,
+                geometry.frame_width.round().max(1.0) as u32,
+                geometry.frame_height.round().max(1.0) as u32,
+            )
+        })
+        .collect()
+}
 
 /// Minimum interval between renders in Normal mode (10 FPS = 100ms)
 /// This reduces CPU usage significantly while still providing smooth timer countdowns
@@ -509,6 +577,8 @@ pub struct RaidOverlay {
     last_render: Instant,
     /// Pending registry actions to be sent to the service
     pending_registry_actions: Vec<RaidRegistryAction>,
+    detection_result_rx: Option<std::sync::mpsc::Receiver<String>>,
+    detection_message: Option<(String, Instant)>,
     european_number_format: bool,
 }
 
@@ -539,6 +609,8 @@ impl RaidOverlay {
             needs_render: true,                            // Initial render needed
             last_render: Instant::now() - RENDER_INTERVAL, // Allow immediate first render
             pending_registry_actions: Vec::new(),
+            detection_result_rx: None,
+            detection_message: None,
             european_number_format: false,
         };
 
@@ -553,39 +625,32 @@ impl RaidOverlay {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn padding(&self) -> f32 {
-        self.frame.scaled(BASE_PADDING)
+        self.geometry().padding
     }
 
     fn gap(&self) -> f32 {
         // frame_spacing is a user-configured pixel value — use it directly
         // without scaling (unlike BASE_PADDING which is a design constant)
-        self.config.frame_spacing
+        self.geometry().gap
+    }
+
+    fn geometry(&self) -> RaidSlotGeometry {
+        raid_slot_geometry(
+            self.frame.width(),
+            self.frame.height(),
+            self.layout,
+            self.config.frame_spacing,
+        )
     }
 
     /// Calculate frame width based on container size and column count
     fn frame_width(&self) -> f32 {
-        let container_width = self.frame.width() as f32;
-        let padding = self.padding();
-        let gap = self.gap();
-        let cols = self.layout.columns as f32;
-
-        // Available width = container - 2*padding - (cols-1)*gap
-        // Frame width = available / cols
-        let available = container_width - (2.0 * padding) - ((cols - 1.0) * gap);
-        (available / cols).max(20.0) // Minimum 20px width
+        self.geometry().frame_width
     }
 
     /// Calculate frame height based on container size and row count
     fn frame_height(&self) -> f32 {
-        let container_height = self.frame.height() as f32;
-        let padding = self.padding();
-        let gap = self.gap();
-        let rows = self.layout.rows as f32;
-
-        // Available height = container - 2*padding - (rows-1)*gap
-        // Frame height = available / rows
-        let available = container_height - (2.0 * padding) - ((rows - 1.0) * gap);
-        (available / rows).max(20.0) // Minimum 20px height
+        self.geometry().frame_height
     }
 
     fn font_size(&self) -> f32 {
@@ -606,6 +671,34 @@ impl RaidOverlay {
         let y = self.padding() + row * (self.frame_height() + self.gap());
 
         (x, y, self.frame_width(), self.frame_height())
+    }
+
+    fn detect_button_bounds(&self) -> (f32, f32, f32, f32) {
+        let padding = self.padding();
+        let size = padding.clamp(14.0, 22.0);
+        let x = (self.frame.width() as f32 - padding - DETECT_BUTTON_EDGE_OVERLAP)
+            .min(self.frame.width() as f32 - size - 2.0)
+            .max(2.0);
+        let y = (padding - size + DETECT_BUTTON_EDGE_OVERLAP).max(2.0);
+        (x, y, size, size)
+    }
+
+    fn detect_button_hit_bounds(&self) -> (f32, f32, f32, f32) {
+        let (x, y, w, h) = self.detect_button_bounds();
+        let padding = self
+            .frame
+            .scaled(DETECT_BUTTON_HIT_PADDING)
+            .clamp(4.0, 8.0);
+        let left = (x - padding).max(0.0);
+        let top = (y - padding).max(0.0);
+        let right = (x + w + padding).min(self.frame.width() as f32);
+        let bottom = (y + h + padding).min(self.frame.height() as f32);
+        (left, top, right - left, bottom - top)
+    }
+
+    fn hit_test_detect_button(&self, px: f32, py: f32) -> bool {
+        let (x, y, w, h) = self.detect_button_hit_bounds();
+        px >= x && px < x + w && py >= y && py < y + h
     }
 
     /// Find which slot (if any) contains the given point
@@ -699,6 +792,85 @@ impl RaidOverlay {
     // Interaction Mode
     // ─────────────────────────────────────────────────────────────────────────
 
+    /// Keep clicks around the button out of the window drag handler.
+    fn refresh_interactive_region(&mut self) {
+        let region = if self.interaction_mode.shows_detect_button() {
+            let (x, y, w, h) = self.detect_button_hit_bounds();
+            Some((
+                x.round() as i32,
+                y.round() as i32,
+                w.round().max(1.0) as u32,
+                h.round().max(1.0) as u32,
+            ))
+        } else {
+            None
+        };
+        self.frame.set_interactive_region(region);
+    }
+
+    fn capture_blanked(&mut self) -> Option<crate::capture::CapturedImage> {
+        self.frame.begin_frame();
+        self.frame.end_frame();
+        std::thread::sleep(std::time::Duration::from_millis(BLANK_SETTLE_MS));
+
+        let result = crate::capture::capture_region(
+            self.frame.x(),
+            self.frame.y(),
+            self.frame.width(),
+            self.frame.height(),
+        );
+
+        self.needs_render = true;
+
+        match result {
+            Ok(image) => Some(image),
+            Err(e) => {
+                tracing::warn!("Raid frame capture failed: {e}");
+                self.set_detection_message("Capture failed; assign manually".into());
+                None
+            }
+        }
+    }
+
+    fn set_detection_message(&mut self, message: String) {
+        self.detection_message = Some((message, Instant::now()));
+        self.needs_render = true;
+    }
+
+    fn emit_detect_action(&mut self) {
+        if self.detection_result_rx.is_some() {
+            self.set_detection_message("Detection is already running".into());
+            return;
+        }
+        let started_at = Instant::now();
+        let Some(image) = self.capture_blanked() else {
+            return;
+        };
+
+        let slots = (0..self.layout.capacity())
+            .map(|slot| {
+                let (x, y, w, h) = self.slot_bounds(slot);
+                (
+                    slot,
+                    x.round() as i32,
+                    y.round() as i32,
+                    w.round().max(1.0) as u32,
+                    h.round().max(1.0) as u32,
+                )
+            })
+            .collect();
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        self.detection_result_rx = Some(result_rx);
+        self.set_detection_message("Reading raid frames...".into());
+        self.pending_registry_actions.push(RaidRegistryAction::DetectNames {
+            started_at,
+            image,
+            slots,
+            result_tx,
+        });
+    }
+
     /// Set the interaction mode
     pub fn set_interaction_mode(&mut self, mode: InteractionMode) {
         self.interaction_mode = mode;
@@ -726,6 +898,8 @@ impl RaidOverlay {
                 self.frame.set_background_alpha(0); // Fully transparent container
             }
         }
+
+        self.refresh_interactive_region();
     }
 
     /// Toggle rearrange mode
@@ -796,7 +970,79 @@ impl RaidOverlay {
         // Overflow indicator
         self.render_overflow_indicator();
 
+        if self.interaction_mode.shows_detect_button() {
+            self.render_detect_button();
+        }
+        self.render_detection_message();
+
         self.frame.end_frame();
+    }
+
+    fn render_detect_button(&mut self) {
+        let (x, y, w, h) = self.detect_button_bounds();
+
+        self.frame.fill_rounded_rect(
+            x,
+            y,
+            w,
+            h,
+            (w * 0.25).max(2.0),
+            Color::from_rgba8(20, 24, 32, 150),
+        );
+
+        let inset = w * 0.22;
+        let lens_size = (w - inset * 2.0) * 0.78;
+        self.frame.stroke_rounded_rect(
+            x + inset,
+            y + inset,
+            lens_size,
+            lens_size,
+            lens_size / 2.0,
+            (w * 0.09).max(1.2),
+            Color::from_rgba8(226, 232, 240, 230),
+        );
+
+        let handle = (w * 0.22).max(2.0);
+        self.frame.fill_rounded_rect(
+            x + inset + lens_size * 0.82,
+            y + inset + lens_size * 0.82,
+            handle,
+            handle,
+            handle * 0.4,
+            Color::from_rgba8(226, 232, 240, 230),
+        );
+    }
+
+    fn render_detection_message(&mut self) {
+        let Some((message, _)) = &self.detection_message else {
+            return;
+        };
+        let message = truncate_name(message, 52);
+        let font_size = self.frame.scaled(9.0).clamp(8.0, 12.0);
+        let (text_width, text_height) = self.frame.measure_text(&message, font_size);
+        let width = (text_width + 12.0).min(self.frame.width() as f32 - 6.0);
+        let height = text_height + 8.0;
+        let (_, button_y, _, button_height) = self.detect_button_bounds();
+        let x = self.frame.width() as f32 - width - 3.0;
+        let y = button_y + button_height + 3.0;
+
+        self.frame.fill_rounded_rect(
+            x,
+            y,
+            width,
+            height,
+            4.0,
+            Color::from_rgba8(20, 24, 32, 225),
+        );
+        self.frame.draw_text_styled(
+            &message,
+            x + 6.0,
+            y + 4.0 + font_size,
+            font_size,
+            Color::from_rgba8(240, 244, 250, 255),
+            false,
+            false,
+        );
     }
 
     /// Render a single player frame
@@ -1289,16 +1535,46 @@ impl Overlay for RaidOverlay {
             return false;
         }
 
+        let detection_result = self
+            .detection_result_rx
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(message) => Some(message),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some("Detection stopped; assign manually".into())
+                }
+            });
+        if let Some(message) = detection_result {
+            self.detection_result_rx = None;
+            self.set_detection_message(message);
+        } else if self.detection_result_rx.is_none()
+            && self
+                .detection_message
+                .as_ref()
+                .is_some_and(|(_, shown_at)| {
+                    shown_at.elapsed()
+                        >= std::time::Duration::from_secs(DETECTION_MESSAGE_SECS)
+                })
+        {
+            self.detection_message = None;
+            self.needs_render = true;
+        }
+
         // Mark dirty if window was resized/moved (affects layout calculations)
         if self.frame.take_position_dirty() {
             self.needs_render = true;
         }
+        // SetSize is not reported as a position change on every backend.
+        self.refresh_interactive_region();
 
-        // Handle clicks in rearrange mode (platform reports clicks when drag is disabled)
-        if self.interaction_mode == InteractionMode::Rearrange
-            && let Some((px, py)) = self.frame.take_pending_click()
-        {
-            self.handle_rearrange_click(px, py);
+        if let Some((px, py)) = self.frame.take_pending_click() {
+            if self.interaction_mode.shows_detect_button() && self.hit_test_detect_button(px, py)
+            {
+                self.emit_detect_action();
+            } else if self.interaction_mode == InteractionMode::Rearrange {
+                self.handle_rearrange_click(px, py);
+            }
         }
 
         true
@@ -1330,11 +1606,37 @@ impl Overlay for RaidOverlay {
         self.set_interaction_mode(new_mode);
     }
 
+    fn request_raid_detection(&mut self) {
+        self.emit_detect_action();
+    }
+
     fn take_pending_registry_actions(&mut self) -> Vec<RaidRegistryAction> {
         std::mem::take(&mut self.pending_registry_actions)
     }
 
     fn needs_render(&self) -> bool {
         self.needs_render
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provisional_name_is_not_an_empty_frame() {
+        let mut frame = RaidFrame::empty(2);
+        assert!(frame.is_empty());
+
+        frame.name = "TEST PLAYER".into();
+        assert!(frame.player_id.is_none());
+        assert!(!frame.is_empty());
+    }
+
+    #[test]
+    fn detect_button_only_shows_in_editing_modes() {
+        assert!(!InteractionMode::Normal.shows_detect_button());
+        assert!(InteractionMode::Move.shows_detect_button());
+        assert!(InteractionMode::Rearrange.shows_detect_button());
     }
 }

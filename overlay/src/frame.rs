@@ -525,6 +525,11 @@ impl OverlayFrame {
         self.window.set_click_through(enabled);
     }
 
+    /// Keep one sub-rectangle clickable while the rest stays click-through
+    pub fn set_interactive_region(&mut self, region: Option<(i32, i32, u32, u32)>) {
+        self.window.set_interactive_region(region);
+    }
+
     /// Enable or disable window dragging when interactive
     pub fn set_drag_enabled(&mut self, enabled: bool) {
         self.window.set_drag_enabled(enabled);

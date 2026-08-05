@@ -353,6 +353,7 @@ impl OperationTimerState {
 pub enum OverlayUpdate {
     CombatStarted,
     CombatEnded,
+    DetectRaidNames,
     /// Combat metrics for metric and personal overlays
     DataUpdated(CombatData),
     /// Effect data for raid frame overlay (HoTs, debuffs, etc.)
@@ -496,6 +497,20 @@ impl SignalHandler for CombatSignalHandler {
                 self.shared.in_combat.store(true, Ordering::SeqCst);
                 let _ = self.trigger_tx.try_send(MetricsTrigger::CombatStarted);
                 let _ = self.session_event_tx.send(SessionEvent::CombatStarted);
+                let should_rematch = self.shared.is_live_tailing.load(Ordering::SeqCst)
+                    && self
+                        .shared
+                        .raid_registry
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .has_provisional();
+                if should_rematch {
+                    let overlay_tx = self.overlay_tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                        let _ = overlay_tx.send(OverlayUpdate::DetectRaidNames).await;
+                    });
+                }
                 // Always wipe a stale boss HP bar at the start of a new encounter.
                 // With `clear_after_combat` disabled the bar persists post-combat, but
                 // it must not linger into the next fight (e.g. trash after a boss).
@@ -551,15 +566,28 @@ impl SignalHandler for CombatSignalHandler {
             }
             GameSignal::PlayerInitialized { entity_id, .. } => {
                 // Emitted only for the local player, before the paired
-                // DisciplineChanged. Adopting the ID here corrects the stale
-                // seed restored from SharedState when a new log file belongs
-                // to a different character than the previous session.
+                // DisciplineChanged. Adopting the ID here corrects the stale seed
+                // restored from SharedState when a new log file belongs to a
+                // different character than the previous session. The signal comes
+                // from the discipline event matching the player identified by
+                // AreaEntered or EnterCombat.
                 if self.local_player_id != Some(*entity_id) {
                     self.local_player_id = Some(*entity_id);
                     self.shared.last_player_id.store(*entity_id, Ordering::SeqCst);
                     // Force role re-evaluation so the DisciplineChanged that
                     // follows fires AutoSwitchProfile for the new character
                     self.current_role = None;
+                }
+
+                let _ = self.session_event_tx.send(SessionEvent::PlayerInitialized);
+
+                // Player just initialized — if not-live auto-hide is active, the
+                // session is now live. Re-evaluate so overlays restore without
+                // waiting for combat.
+                if self.shared.auto_hide.is_not_live_active() {
+                    let _ = self
+                        .overlay_tx
+                        .try_send(OverlayUpdate::NotLiveStateChanged { is_live: true });
                 }
             }
             GameSignal::DisciplineChanged {
@@ -568,23 +596,15 @@ impl SignalHandler for CombatSignalHandler {
                 discipline_id,
                 ..
             } => {
-                // First DisciplineChanged is always the local player (only when
-                // no player ID was restored from a previous handler via SharedState)
-                if self.local_player_id.is_none() {
-                    self.local_player_id = Some(*entity_id);
-                    self.shared.last_player_id.store(*entity_id, Ordering::SeqCst);
-                }
                 // Update raid registry with discipline info for role icons
-                let mut registry = self.shared.raid_registry.lock().unwrap_or_else(|p| p.into_inner());
+                let mut registry = self
+                    .shared
+                    .raid_registry
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
                 registry.update_discipline(*entity_id, *class_id, *discipline_id);
-                // Notify frontend of player info change
-                let _ = self.session_event_tx.send(SessionEvent::PlayerInitialized);
-                // Player just initialized — if not-live auto-hide is active, the session
-                // is now live. Re-evaluate so overlays restore without waiting for combat.
-                if self.shared.auto_hide.is_not_live_active() {
-                    let _ = self
-                        .overlay_tx
-                        .try_send(OverlayUpdate::NotLiveStateChanged { is_live: true });
+                if self.local_player_id != Some(*entity_id) {
+                    let _ = self.session_event_tx.send(SessionEvent::PlayerInitialized);
                 }
                 // Auto-switch profile on role change (only for local player)
                 if self.local_player_id == Some(*entity_id) {
@@ -3186,17 +3206,49 @@ async fn calculate_combat_data(shared: &Arc<SharedState>) -> Option<CombatData> 
 /// Uses RaidSlotRegistry to maintain stable player positions.
 /// Players are registered ONLY when the local player applies a NEW effect to them
 /// (via the new_targets queue), not on every tick.
+fn provisional_raid_frame(slot: u8, name: &str) -> RaidFrame {
+    RaidFrame {
+        slot,
+        player_id: None,
+        name: name.to_string(),
+        hp_percent: 1.0,
+        role: PlayerRole::Dps,
+        class_icon: None,
+        effects: Vec::new(),
+        is_self: false,
+    }
+}
+
+fn provisional_raid_frame_data(shared: &Arc<SharedState>) -> Option<RaidFrameData> {
+    let registry = shared
+        .raid_registry
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let frames: Vec<_> = (0..registry.max_slots())
+        .filter_map(|slot| {
+            registry
+                .get_provisional(slot)
+                .map(|name| provisional_raid_frame(slot, name))
+        })
+        .collect();
+    (!frames.is_empty()).then_some(RaidFrameData { frames })
+}
+
 async fn build_raid_frame_data(
     shared: &Arc<SharedState>,
     rearranging: bool,
     icon_cache: Option<&Arc<baras_overlay::icons::IconCache>>,
 ) -> Option<RaidFrameData> {
     let session_guard = shared.session.read().await;
-    let session = session_guard.as_ref()?;
+    let Some(session) = session_guard.as_ref() else {
+        return provisional_raid_frame_data(shared);
+    };
     let session = session.read().await;
 
     // Get effect tracker (Live mode only)
-    let effect_tracker = session.effect_tracker()?;
+    let Some(effect_tracker) = session.effect_tracker() else {
+        return provisional_raid_frame_data(shared);
+    };
     let mut tracker = effect_tracker.lock().unwrap_or_else(|poisoned| {
         tracing::warn!("Effect tracker mutex was poisoned, recovering");
         poisoned.into_inner()
@@ -3293,6 +3345,8 @@ async fn build_raid_frame_data(
                 effects,
                 is_self: player.entity_id == local_player_id,
             });
+        } else if let Some(name) = registry.get_provisional(slot) {
+            frames.push(provisional_raid_frame(slot, name));
         }
     }
 

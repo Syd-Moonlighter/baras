@@ -3,7 +3,7 @@
 //! Players are added when they receive an effect from the local player.
 //! Players stay in their assigned slot until explicitly removed by user action.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Information about a player registered in the raid frame
 #[derive(Debug, Clone)]
@@ -33,6 +33,8 @@ impl RegisteredPlayer {
 pub struct RaidSlotRegistry {
     /// Maps slot (0-15) → registered player info
     slots: HashMap<u8, RegisteredPlayer>,
+    /// Names read before a combat-log roster is available.
+    provisional_slots: HashMap<u8, String>,
     /// Reverse lookup: entity_id → slot
     entity_to_slot: HashMap<i64, u8>,
     /// Maximum number of slots (configurable, default 8)
@@ -47,6 +49,7 @@ impl RaidSlotRegistry {
     pub fn new(max_slots: u8) -> Self {
         Self {
             slots: HashMap::new(),
+            provisional_slots: HashMap::new(),
             entity_to_slot: HashMap::new(),
             max_slots,
             pending_disciplines: HashMap::new(),
@@ -63,8 +66,16 @@ impl RaidSlotRegistry {
             return None;
         }
 
-        // Find first available slot (returns None if all full)
-        let slot = self.find_first_available_slot()?;
+        let normalized = baras_core::raid_detect::normalize(&name);
+        let provisional_slot = self
+            .provisional_slots
+            .iter()
+            .find(|(_, provisional)| {
+                baras_core::raid_detect::normalize(provisional) == normalized
+            })
+            .map(|(&slot, _)| slot);
+        let slot = provisional_slot.or_else(|| self.find_first_available_slot())?;
+        self.provisional_slots.remove(&slot);
         let mut player = RegisteredPlayer::new(entity_id, name);
 
         // Check for pending discipline info (DisciplineChanged often fires before registration)
@@ -105,13 +116,103 @@ impl RaidSlotRegistry {
 
     /// Find the first available slot (lowest numbered empty slot)
     fn find_first_available_slot(&self) -> Option<u8> {
-        (0..self.max_slots).find(|&s| !self.slots.contains_key(&s))
+        (0..self.max_slots).find(|&slot| {
+            !self.slots.contains_key(&slot) && !self.provisional_slots.contains_key(&slot)
+        })
+    }
+
+    /// Update OCR-only slots without touching log-backed players.
+    pub fn assign_provisional_slots(
+        &mut self,
+        assignments: impl IntoIterator<Item = (u8, String)>,
+    ) {
+        self.provisional_slots.clear();
+        let mut seen_slots = HashSet::new();
+        let mut seen_names: HashSet<_> = self
+            .slots
+            .values()
+            .map(|player| baras_core::raid_detect::normalize(&player.name))
+            .collect();
+
+        for (slot, name) in assignments {
+            let name = name.trim();
+            let normalized = baras_core::raid_detect::normalize(name);
+            if slot >= self.max_slots
+                || self.slots.contains_key(&slot)
+                || normalized.len() < baras_core::raid_detect::MIN_OCR_NAME_CHARS
+                || !seen_slots.insert(slot)
+                || !seen_names.insert(normalized)
+            {
+                continue;
+            }
+            self.provisional_slots.insert(slot, name.to_string());
+        }
+    }
+
+    /// Apply a detection batch without losing metadata during swaps.
+    pub fn assign_slots(
+        &mut self,
+        assignments: impl IntoIterator<Item = (u8, i64, String)>,
+    ) {
+        let mut seen_slots = HashSet::new();
+        let mut seen_entities = HashSet::new();
+        let assignments: Vec<_> = assignments
+            .into_iter()
+            .filter(|(slot, entity_id, _)| {
+                *slot < self.max_slots
+                    && seen_slots.insert(*slot)
+                    && seen_entities.insert(*entity_id)
+            })
+            .collect();
+
+        let mut players = HashMap::new();
+        for (_, entity_id, _) in &assignments {
+            let Some(old_slot) = self.entity_to_slot.remove(entity_id) else {
+                continue;
+            };
+            if let Some(player) = self.slots.remove(&old_slot) {
+                players.insert(*entity_id, player);
+            }
+        }
+
+        for (slot, _, _) in &assignments {
+            self.provisional_slots.remove(slot);
+            if let Some(displaced) = self.slots.remove(slot) {
+                self.entity_to_slot.remove(&displaced.entity_id);
+                if let (Some(class_id), Some(discipline_id)) =
+                    (displaced.class_id, displaced.discipline_id)
+                {
+                    self.pending_disciplines
+                        .insert(displaced.entity_id, (class_id, discipline_id));
+                }
+            }
+        }
+
+        for (slot, entity_id, name) in assignments {
+            let mut player = players
+                .remove(&entity_id)
+                .unwrap_or_else(|| RegisteredPlayer::new(entity_id, name.clone()));
+            player.name = name;
+
+            if player.class_id.is_none()
+                && let Some((class_id, discipline_id)) =
+                    self.pending_disciplines.remove(&entity_id)
+            {
+                player.class_id = Some(class_id);
+                player.discipline_id = Some(discipline_id);
+            }
+
+            self.slots.insert(slot, player);
+            self.entity_to_slot.insert(entity_id, slot);
+        }
     }
 
     /// Swap two slots (user-initiated rearrange)
     pub fn swap_slots(&mut self, slot_a: u8, slot_b: u8) {
         let player_a = self.slots.remove(&slot_a);
         let player_b = self.slots.remove(&slot_b);
+        let provisional_a = self.provisional_slots.remove(&slot_a);
+        let provisional_b = self.provisional_slots.remove(&slot_b);
 
         if let Some(p) = player_a {
             self.entity_to_slot.insert(p.entity_id, slot_b);
@@ -121,10 +222,17 @@ impl RaidSlotRegistry {
             self.entity_to_slot.insert(p.entity_id, slot_a);
             self.slots.insert(slot_a, p);
         }
+        if let Some(name) = provisional_a {
+            self.provisional_slots.insert(slot_b, name);
+        }
+        if let Some(name) = provisional_b {
+            self.provisional_slots.insert(slot_a, name);
+        }
     }
 
     /// Remove player from a specific slot (user-initiated delete)
     pub fn remove_slot(&mut self, slot: u8) {
+        self.provisional_slots.remove(&slot);
         if let Some(player) = self.slots.remove(&slot) {
             self.entity_to_slot.remove(&player.entity_id);
         }
@@ -140,6 +248,22 @@ impl RaidSlotRegistry {
         self.slots.get(&slot)
     }
 
+    pub fn get_provisional(&self, slot: u8) -> Option<&str> {
+        self.provisional_slots.get(&slot).map(String::as_str)
+    }
+
+    pub fn has_provisional(&self) -> bool {
+        !self.provisional_slots.is_empty()
+    }
+
+    pub fn provisional_len(&self) -> usize {
+        self.provisional_slots.len()
+    }
+
+    pub fn registered_len(&self) -> usize {
+        self.slots.len()
+    }
+
     /// Check if a player is registered
     pub fn is_registered(&self, entity_id: i64) -> bool {
         self.entity_to_slot.contains_key(&entity_id)
@@ -148,6 +272,7 @@ impl RaidSlotRegistry {
     /// Clear all assignments (new session/encounter)
     pub fn clear(&mut self) {
         self.slots.clear();
+        self.provisional_slots.clear();
         self.entity_to_slot.clear();
         self.pending_disciplines.clear();
     }
@@ -159,12 +284,12 @@ impl RaidSlotRegistry {
 
     /// Number of registered players
     pub fn len(&self) -> usize {
-        self.slots.len()
+        self.slots.len() + self.provisional_slots.len()
     }
 
     /// Check if registry is empty
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.slots.is_empty() && self.provisional_slots.is_empty()
     }
 
     /// Maximum slots configured
@@ -181,8 +306,9 @@ impl RaidSlotRegistry {
             return 0;
         }
 
-        // Collect players that need to be moved (in slots >= new_max)
         let mut displaced: Vec<RegisteredPlayer> = Vec::new();
+        let mut provisional: Vec<_> = self.provisional_slots.drain().collect();
+        provisional.sort_by_key(|(slot, _)| *slot);
         let mut slots_to_remove = Vec::new();
 
         for &slot in self.slots.keys() {
@@ -197,10 +323,8 @@ impl RaidSlotRegistry {
                 displaced.push(player);
             }
         }
-
         self.max_slots = new_max;
 
-        // Try to place displaced players in available slots
         let mut removed_count = 0;
         for player in displaced {
             if let Some(new_slot) = self.find_first_available_slot() {
@@ -208,11 +332,132 @@ impl RaidSlotRegistry {
                 self.slots.insert(new_slot, player);
                 self.entity_to_slot.insert(entity_id, new_slot);
             } else {
-                // No room - player is lost
+                removed_count += 1;
+            }
+        }
+        for (old_slot, name) in provisional {
+            let slot = (old_slot < new_max
+                && !self.slots.contains_key(&old_slot)
+                && !self.provisional_slots.contains_key(&old_slot))
+                .then_some(old_slot)
+                .or_else(|| self.find_first_available_slot());
+            if let Some(slot) = slot {
+                self.provisional_slots.insert(slot, name);
+            } else {
                 removed_count += 1;
             }
         }
 
         removed_count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detected_swap_keeps_player_metadata() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.try_register(1, "One".into());
+        registry.try_register(2, "Two".into());
+        registry.update_discipline(1, 10, 11);
+        registry.update_discipline(2, 20, 21);
+
+        registry.assign_slots([(1, 1, "One".into()), (0, 2, "Two".into())]);
+
+        let one = registry.get_player(1).unwrap();
+        let two = registry.get_player(0).unwrap();
+        assert_eq!((one.class_id, one.discipline_id), (Some(10), Some(11)));
+        assert_eq!((two.class_id, two.discipline_id), (Some(20), Some(21)));
+        assert_eq!(registry.get_slot(1), Some(1));
+        assert_eq!(registry.get_slot(2), Some(0));
+    }
+
+    #[test]
+    fn detection_remembers_metadata_for_an_evicted_player() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.try_register(1, "One".into());
+        registry.try_register(2, "Two".into());
+        registry.update_discipline(2, 20, 21);
+
+        registry.assign_slots([(1, 1, "One".into())]);
+        registry.assign_slots([(2, 2, "Two".into())]);
+
+        let two = registry.get_player(2).unwrap();
+        assert_eq!((two.class_id, two.discipline_id), (Some(20), Some(21)));
+    }
+
+    #[test]
+    fn provisional_name_is_not_a_registered_entity() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(2, "PLAYER 8K".into())]);
+
+        assert_eq!(registry.get_provisional(2), Some("PLAYER 8K"));
+        assert!(!registry.is_registered(2));
+        assert!(registry.has_provisional());
+    }
+
+    #[test]
+    fn provisional_names_use_the_shared_ocr_minimum() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(0, "AI".into()), (1, "BOT".into())]);
+
+        assert_eq!(registry.get_provisional(0), None);
+        assert_eq!(registry.get_provisional(1), Some("BOT"));
+    }
+
+    #[test]
+    fn real_player_can_claim_matching_provisional_slot() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(2, "Alpha".into())]);
+
+        assert_eq!(registry.try_register(42, "ALPHA".into()), Some(2));
+        assert_eq!(registry.get_provisional(2), None);
+        assert_eq!(registry.get_player(2).map(|p| p.entity_id), Some(42));
+    }
+
+    #[test]
+    fn provisional_pass_does_not_replace_real_players() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.try_register(42, "Alpha".into());
+
+        registry.assign_provisional_slots([
+            (0, "Wrong".into()),
+            (1, "Alpha".into()),
+            (2, "Bravo".into()),
+        ]);
+
+        assert_eq!(registry.get_player(0).map(|p| p.entity_id), Some(42));
+        assert_eq!(registry.get_provisional(0), None);
+        assert_eq!(registry.get_provisional(1), None);
+        assert_eq!(registry.get_provisional(2), Some("Bravo"));
+    }
+
+    #[test]
+    fn partial_log_match_keeps_the_unresolved_names_for_the_next_combat() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([
+            (0, "Alpha".into()),
+            (1, "Bravo".into()),
+            (2, "Charlie".into()),
+        ]);
+
+        registry.assign_slots([(0, 42, "Alpha".into())]);
+
+        assert_eq!(registry.provisional_len(), 2);
+        assert_eq!(registry.get_provisional(1), Some("Bravo"));
+        assert_eq!(registry.get_provisional(2), Some("Charlie"));
+    }
+
+    #[test]
+    fn real_players_take_priority_when_the_grid_shrinks() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(0, "Bravo".into()), (1, "Charlie".into())]);
+        registry.assign_slots([(3, 42, "Alpha".into())]);
+
+        assert_eq!(registry.set_max_slots(2), 1);
+        assert_eq!(registry.get_player(0).map(|p| p.entity_id), Some(42));
+        assert_eq!(registry.provisional_len(), 1);
     }
 }

@@ -12,7 +12,7 @@ use crate::overlay::{
 use crate::service::{OverlayUpdate, ServiceHandle};
 use crate::state::SharedState;
 use baras_overlay::{OverlayData, RaidRegistryAction};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 /// Spawn the overlay update router task.
 ///
@@ -53,6 +53,7 @@ pub fn spawn_overlay_router(
     });
 
     // Main router loop - no timeout needed, uses select!
+    let detection_gate = Arc::new(Semaphore::new(1));
     tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
@@ -77,7 +78,7 @@ pub fn spawn_overlay_router(
                 // Wait for registry actions
                 action = registry_rx.recv() => {
                     if let Some(action) = action {
-                        process_registry_action(&service_handle, action).await;
+                        process_registry_action(&service_handle, &detection_gate, action).await;
                     }
                 }
             }
@@ -86,7 +87,11 @@ pub fn spawn_overlay_router(
 }
 
 /// Process a registry action from the raid overlay
-async fn process_registry_action(service_handle: &ServiceHandle, action: RaidRegistryAction) {
+async fn process_registry_action(
+    service_handle: &ServiceHandle,
+    detection_gate: &Arc<Semaphore>,
+    action: RaidRegistryAction,
+) {
     match action {
         RaidRegistryAction::SwapSlots(a, b) => {
             service_handle.swap_raid_slots(a, b).await;
@@ -94,7 +99,160 @@ async fn process_registry_action(service_handle: &ServiceHandle, action: RaidReg
         RaidRegistryAction::ClearSlot(slot) => {
             service_handle.remove_raid_slot(slot).await;
         }
+        RaidRegistryAction::DetectNames {
+            started_at,
+            image,
+            slots,
+            result_tx,
+        } => {
+            let Ok(permit) = detection_gate.clone().try_acquire_owned() else {
+                tracing::info!("Raid name detection is already running");
+                let _ = result_tx.send("Detection is already running".into());
+                return;
+            };
+            let service_handle = service_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let _permit = permit;
+                detect_raid_names(&service_handle, started_at, image, slots, result_tx).await;
+            });
+        }
     }
+}
+
+struct RaidOcrResult {
+    observations: Vec<baras_core::raid_detect::RowObservation>,
+    assignments: Vec<baras_core::raid_detect::RowAssignment>,
+}
+
+fn raid_detection_message(
+    slot_count: usize,
+    names_read: usize,
+    matched: usize,
+    candidate_count: usize,
+    provisional: usize,
+    registered: usize,
+) -> String {
+    let prefix = format!("OCR {names_read}/{slot_count}");
+    let retained = registered.saturating_sub(matched);
+    let registry_state = match (retained, provisional) {
+        (0, 0) => "assignments unchanged".to_string(),
+        (retained, 0) => format!("{retained} retained"),
+        (0, provisional) => format!("{provisional} provisional"),
+        (retained, provisional) => format!("{retained} retained, {provisional} provisional"),
+    };
+
+    if candidate_count == 0 {
+        return format!("{prefix}; no roster; {registry_state}");
+    }
+
+    if matched == candidate_count && provisional == 0 {
+        format!("{prefix}; matched all {matched} log players")
+    } else {
+        format!("{prefix}; matched {matched}/{candidate_count}; {registry_state}")
+    }
+}
+
+async fn detect_raid_names(
+    service_handle: &ServiceHandle,
+    started_at: std::time::Instant,
+    image: baras_overlay::capture::CapturedImage,
+    slots: Vec<(u8, i32, i32, u32, u32)>,
+    result_tx: std::sync::mpsc::Sender<String>,
+) {
+    let candidates = service_handle.raid_detection_candidates().await;
+
+    if let Err(e) = baras_raid_ocr::engine::ensure_model().await {
+        tracing::warn!("Raid name detection unavailable: {e}");
+        let _ = result_tx.send("OCR unavailable; assign manually".into());
+        return;
+    }
+
+    let slot_count = slots.len();
+    let candidate_count = candidates.len();
+    let result = tokio::task::spawn_blocking(move || {
+        let observations = baras_raid_ocr::observe_slots(&image, &slots);
+        let assignments = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            baras_core::raid_detect::assign_rows(
+                &observations,
+                &candidates,
+                &baras_core::raid_detect::MatchConfig::default(),
+            )
+        };
+        RaidOcrResult {
+            observations,
+            assignments,
+        }
+    })
+    .await;
+
+    let result = match result {
+        Ok(result) => result,
+        Err(e) => {
+            tracing::warn!("Raid name detection panicked: {e}");
+            let _ = result_tx.send("Detection failed; assign manually".into());
+            return;
+        }
+    };
+
+    let RaidOcrResult {
+        observations,
+        assignments,
+    } = result;
+    let details = observations
+        .iter()
+        .map(|row| {
+            format!(
+                "{}={:?} hp={:?}/{:?}%",
+                row.row, row.name_text, row.hp_value, row.hp_percent
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut names = baras_raid_ocr::ocr_only_names(&observations);
+    let names_read = names.len();
+    names.retain(|(row, _)| !assignments.iter().any(|a| a.row == *row as usize));
+
+    if assignments.is_empty() && names.is_empty() {
+        let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        tracing::info!(
+            elapsed_ms,
+            candidate_count,
+            observations = %details,
+            "Raid name detection could not read any names"
+        );
+        let _ = result_tx.send("No names read; check the raid-frame alignment".into());
+        return;
+    }
+
+    let matched = assignments.len();
+    if matched > 0 {
+        let _ = service_handle.apply_raid_detection(assignments).await;
+    }
+    let (provisional, registered) = service_handle.apply_provisional_raid_detection(names).await;
+    let retained = registered.saturating_sub(matched);
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+
+    tracing::info!(
+        elapsed_ms,
+        matched,
+        names_read,
+        provisional,
+        retained,
+        candidate_count,
+        observations = %details,
+        "Raid name detection complete"
+    );
+
+    let _ = result_tx.send(raid_detection_message(
+        slot_count,
+        names_read,
+        matched,
+        candidate_count,
+        provisional,
+        registered,
+    ));
 }
 
 /// Process a single overlay update
@@ -430,6 +588,18 @@ async fn process_overlay_update(
                 service_handle.emit_overlay_status_changed();
             }
         }
+        OverlayUpdate::DetectRaidNames => {
+            let raid_tx = {
+                let state = match overlay_state.lock() {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+                state.get_raid_tx().cloned()
+            };
+            if let Some(tx) = raid_tx {
+                let _ = tx.send(OverlayCommand::DetectRaidNames).await;
+            }
+        }
         OverlayUpdate::CombatEnded => {
             // Clear boss health, timer, and challenges overlays when combat ends
             let channels: Vec<_> = {
@@ -659,5 +829,34 @@ async fn process_overlay_update(
             }
             service_handle.emit_overlay_status_changed();
         }
+    }
+}
+
+#[cfg(test)]
+mod raid_detection_message_tests {
+    use super::raid_detection_message;
+
+    #[test]
+    fn reports_ocr_and_registry_results_separately() {
+        assert_eq!(
+            raid_detection_message(8, 8, 0, 0, 1, 7),
+            "OCR 8/8; no roster; 7 retained, 1 provisional"
+        );
+        assert_eq!(
+            raid_detection_message(8, 8, 0, 0, 0, 8),
+            "OCR 8/8; no roster; 8 retained"
+        );
+        assert_eq!(
+            raid_detection_message(8, 6, 6, 8, 0, 8),
+            "OCR 6/8; matched 6/8; 2 retained"
+        );
+        assert_eq!(
+            raid_detection_message(8, 8, 8, 8, 0, 8),
+            "OCR 8/8; matched all 8 log players"
+        );
+        assert_eq!(
+            raid_detection_message(8, 8, 6, 8, 1, 7),
+            "OCR 8/8; matched 6/8; 1 retained, 1 provisional"
+        );
     }
 }

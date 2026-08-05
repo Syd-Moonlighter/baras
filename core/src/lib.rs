@@ -8,6 +8,7 @@ pub mod game_data;
 pub mod icons;
 #[cfg(feature = "query")]
 pub mod query;
+pub mod raid_detect;
 pub mod serde_defaults;
 pub mod signal_processor;
 pub mod state;

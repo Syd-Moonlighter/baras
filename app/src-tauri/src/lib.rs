@@ -14,6 +14,7 @@ mod commands;
 mod hotkeys;
 mod logging;
 pub mod overlay;
+
 mod router;
 pub mod service;
 pub mod state;

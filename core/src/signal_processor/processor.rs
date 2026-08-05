@@ -2,7 +2,6 @@ use crate::combat_log::{CombatEvent, EntityType};
 use crate::context::resolve;
 use crate::dsl::triggers::EntitySelectorExt;
 use crate::encounter::combat::ActiveBoss;
-use crate::encounter::entity_info::PlayerInfo;
 use crate::encounter::EncounterState;
 use crate::game_data::{
     correct_apply_charges, effect_id, effect_type_id, BATTLE_REZ_ABILITY_IDS,
@@ -49,8 +48,13 @@ impl EventProcessor {
             enc.update_entity_positions(&event);
         }
 
+        // AreaEntered and EnterCombat are emitted for the local player. Remember
+        // that identity before the entity-ID-sorted discipline batch arrives.
+        self.observe_local_player_identity(&event, cache);
+
         // 1a. Player/discipline tracking
         self.handle_discipline_event(&event, cache, &mut signals);
+        self.update_registered_player_health(&event, cache);
 
         // 1b. Entity lifecycle (death/revive)
         self.handle_entity_lifecycle(&event, cache, &mut signals);
@@ -228,30 +232,58 @@ impl EventProcessor {
         cache.player.discipline_name = resolve(event.effect.discipline_name).to_string();
     }
 
+    fn observe_local_player_identity(&self, event: &CombatEvent, cache: &mut SessionCache) {
+        let identifies_local_player = event.effect.type_id == effect_type_id::AREAENTERED
+            || event.effect.effect_id == effect_id::ENTERCOMBAT;
+        if !cache.player_initialized
+            && identifies_local_player
+            && event.source_entity.entity_type == EntityType::Player
+            && event.source_entity.log_id != 0
+        {
+            cache.player.name = event.source_entity.name;
+            cache.player.id = event.source_entity.log_id;
+        }
+    }
+
     fn register_player_discipline(&self, event: &CombatEvent, cache: &mut SessionCache) {
         // Only register actual players, not companions
         if event.source_entity.entity_type != EntityType::Player {
             return;
         }
 
-        let player_info = PlayerInfo {
-            id: event.source_entity.log_id,
-            name: event.source_entity.name,
-            class_id: event.effect.effect_id,
-            class_name: resolve(event.effect.effect_name).to_string(),
-            discipline_id: event.effect.discipline_id,
-            discipline_name: resolve(event.effect.discipline_name).to_string(),
-            is_dead: false,
-            death_time: None,
-            received_revive_immunity: false,
-            current_target_id: 0,
-            last_seen_at: Some(event.timestamp),
-        };
-
-        // Upsert into session-level player discipline registry (source of truth)
-        cache
+        let player = cache
             .player_disciplines
-            .insert(event.source_entity.log_id, player_info);
+            .entry(event.source_entity.log_id)
+            .or_default();
+        player.id = event.source_entity.log_id;
+        player.name = event.source_entity.name;
+        player.class_id = event.effect.effect_id;
+        player.class_name = resolve(event.effect.effect_name).to_string();
+        player.discipline_id = event.effect.discipline_id;
+        player.discipline_name = resolve(event.effect.discipline_name).to_string();
+        player.is_dead = false;
+        player.death_time = None;
+        player.received_revive_immunity = false;
+        player.current_target_id = 0;
+        player.last_seen_at = Some(event.timestamp);
+        if event.source_entity.health.1 > 0 {
+            player.current_hp = event.source_entity.health.0;
+            player.max_hp = event.source_entity.health.1;
+        }
+    }
+
+    /// Keep roster health as fresh as the log permits without changing roster
+    /// membership. `last_seen_at` deliberately remains the discipline timestamp.
+    fn update_registered_player_health(&self, event: &CombatEvent, cache: &mut SessionCache) {
+        for entity in [&event.source_entity, &event.target_entity] {
+            if entity.entity_type != EntityType::Player || entity.health.1 <= 0 {
+                continue;
+            }
+            if let Some(player) = cache.player_disciplines.get_mut(&entity.log_id) {
+                player.current_hp = entity.health.0;
+                player.max_hp = entity.health.1;
+            }
+        }
     }
 
     fn update_area_from_event(&self, event: &CombatEvent, cache: &mut SessionCache) {
@@ -291,8 +323,10 @@ impl EventProcessor {
             return;
         }
 
-        // Initialize or update primary player
-        if !cache.player_initialized || event.source_entity.log_id == cache.player.id {
+        // A discipline batch is sorted by entity ID, not by raid position and
+        // not with the local player first. Only update the identity established
+        // by AreaEntered or EnterCombat.
+        if event.source_entity.log_id == cache.player.id {
             self.update_primary_player(event, cache);
             if cache.player_initialized {
                 out.push(GameSignal::PlayerInitialized {

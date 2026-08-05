@@ -16,6 +16,10 @@ pub struct PlayerInfo {
     pub current_target_id: i64,
     /// Last time this player was seen in an event (for filtering stale players)
     pub last_seen_at: Option<NaiveDateTime>,
+    /// Most recent health reading from the log.
+    pub current_hp: i32,
+    /// Most recent max health from the log.
+    pub max_hp: i32,
 }
 
 impl Default for PlayerInfo {
@@ -32,6 +36,8 @@ impl Default for PlayerInfo {
             received_revive_immunity: false,
             current_target_id: 0,
             last_seen_at: None,
+            current_hp: 0,
+            max_hp: 0,
         }
     }
 }
