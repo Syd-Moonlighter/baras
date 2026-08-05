@@ -41,6 +41,25 @@ fn ocr_output_and_log_name_converge() {
 }
 
 #[test]
+fn digits_are_dropped_because_names_cannot_contain_them() {
+    // Trailing digits are icon fragments from the edge of the crop, never part
+    // of a SWTOR name.
+    // Only the digit goes; the stray 'K' is a letter and could belong to a real
+    // name, so edit distance deals with it rather than normalization.
+    assert_eq!(normalize("TESTALPHA8K"), "TESTALPHAK");
+    assert_eq!(normalize("TEST BRAVO6"), "TESTBRAVO");
+    assert_eq!(normalize("3TEST4CHARLIE5"), "TESTCHARLIE");
+}
+
+#[test]
+fn eszett_expands_the_way_the_game_uppercases_it() {
+    // SWTOR renders ß as SS in an uppercased raid frame, so the log name has to
+    // fold the same way or it ends up a character shorter than the reading.
+    assert_eq!(normalize("Straße"), "STRASSE");
+    assert_eq!(normalize("Straße"), normalize("STRASSE"));
+}
+
+#[test]
 fn folding_is_idempotent() {
     for name in ["Tést Alpha", "@Test Long-name#1", "Test'Bravo", "Hotel"] {
         let once = normalize(name);

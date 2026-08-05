@@ -6,7 +6,9 @@
 ///
 /// `×` and `÷` map to `x` but are stripped later by [`is_kept`]; they are only
 /// present to keep the table dense.
-const LATIN1_FOLD: &[u8; 64] = b"AAAAAAACEEEEIIIIDNOOOOOxOUUUUYPsaaaaaaaceeeeiiiidnoooooxouuuuypy";
+///
+/// `ß` (U+00DF) is deliberately left unfolded — see [`fold_char`].
+const LATIN1_FOLD: &[u8; 64] = b"AAAAAAACEEEEIIIIDNOOOOOxOUUUUYP\0aaaaaaaceeeeiiiidnoooooxouuuuypy";
 
 /// Fold a single character toward ASCII.
 ///
@@ -14,6 +16,13 @@ const LATIN1_FOLD: &[u8; 64] = b"AAAAAAACEEEEIIIIDNOOOOOxOUUUUYPsaaaaaaaceeeeiii
 /// uppercase and filter afterwards.
 fn fold_char(c: char) -> char {
     let cp = c as u32;
+
+    // `ß` is left for `to_uppercase`, which expands it to "SS". SWTOR uppercases
+    // it the same way on screen, so folding it to a single 's' here would make
+    // the log name one character shorter than what OCR reads back.
+    if c == 'ß' {
+        return c;
+    }
 
     // Latin-1 Supplement: dense enough for a table.
     if (0xC0..=0xFF).contains(&cp) {
@@ -67,8 +76,13 @@ fn fold_char(c: char) -> char {
 }
 
 /// Characters that survive normalization.
+///
+/// Letters only. SWTOR names allow letters, one space, one hyphen and up to two
+/// apostrophes — never digits. Any digit in a reading is therefore noise from an
+/// icon at the edge of the crop, and dropping it tightens the comparison rather
+/// than losing information.
 fn is_kept(c: char) -> bool {
-    c.is_ascii_alphanumeric()
+    c.is_ascii_alphabetic()
 }
 
 /// Strip combat-log decoration from a name.
