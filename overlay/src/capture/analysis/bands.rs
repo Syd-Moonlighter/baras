@@ -276,6 +276,21 @@ pub fn harmonize(per_slot: &mut [Vec<Band>]) {
                 }
             }
         }
+
+        // A slot holding the other band has a player in it, so a missing band is
+        // a detection failure rather than an empty frame. The health bar stops
+        // being red enough to find below about a quarter health, which is where
+        // the number matters most.
+        for bands in per_slot.iter_mut() {
+            if bands.is_empty() || bands.iter().any(|b| b.kind == kind) {
+                continue;
+            }
+            bands.push(Band {
+                top: consensus_bottom.saturating_sub(consensus_height),
+                height: consensus_height,
+                kind,
+            });
+        }
     }
 }
 
@@ -542,6 +557,47 @@ mod tests {
 
         assert_eq!(slots[0][0].top, 3);
         assert_eq!(slots[5][0].top, 18);
+    }
+
+    /// A low health bar carries too little red to be found, so the slot inherits
+    /// the band the others agree on. An empty frame still gets nothing.
+    #[test]
+    fn harmonize_fills_in_a_band_the_slot_could_not_find() {
+        let full = |top| {
+            vec![
+                Band {
+                    top,
+                    height: 18,
+                    kind: BandKind::Health,
+                },
+                Band {
+                    top: 10,
+                    height: 13,
+                    kind: BandKind::Name,
+                },
+            ]
+        };
+        let mut slots = vec![
+            full(24),
+            full(24),
+            full(23),
+            // Read at 18% health: a name, but no health bar red enough to find.
+            vec![Band {
+                top: 10,
+                height: 13,
+                kind: BandKind::Name,
+            }],
+            Vec::new(),
+        ];
+
+        harmonize(&mut slots);
+
+        let filled = slots[3]
+            .iter()
+            .find(|b| b.kind == BandKind::Health)
+            .expect("slot with a name should inherit the health band");
+        assert_eq!((filled.top, filled.height), (24, 18));
+        assert!(slots[4].is_empty(), "an empty frame invents nothing");
     }
 
     /// Two readable slots agree about nothing worth acting on.
