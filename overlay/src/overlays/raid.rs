@@ -847,15 +847,18 @@ impl RaidOverlay {
             return;
         };
 
+        // Slot bounds are logical; a scaled capture returns more pixels than were
+        // asked for, so they follow the same factor. Exactly 1.0 on Windows.
+        let scale = image.width as f32 / self.frame.width().max(1) as f32;
         let slots = (0..self.layout.capacity())
             .map(|slot| {
                 let (x, y, w, h) = self.slot_bounds(slot);
                 (
                     slot,
-                    x.round() as i32,
-                    y.round() as i32,
-                    w.round().max(1.0) as u32,
-                    h.round().max(1.0) as u32,
+                    (x * scale).round() as i32,
+                    (y * scale).round() as i32,
+                    (w * scale).round().max(1.0) as u32,
+                    (h * scale).round().max(1.0) as u32,
                 )
             })
             .collect();

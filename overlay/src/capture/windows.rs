@@ -3,6 +3,8 @@
 //! Exclusive fullscreen may return a black image; windowed and borderless modes
 //! use the composited desktop and work normally.
 
+use std::time::Instant;
+
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, HDC, ReleaseDC,
     SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, SRCCOPY,
@@ -16,18 +18,21 @@ pub fn capture_region(
     width: u32,
     height: u32,
 ) -> Result<CapturedImage, CaptureError> {
+    let started = Instant::now();
+
     let screen_dc = unsafe { GetDC(None) };
     if screen_dc.is_invalid() {
         return Err(CaptureError::ConnectionFailed("GetDC(None) failed".into()));
     }
 
-    let result = capture_with_dc(screen_dc, x, y, width, height);
+    let result = capture_with_dc(screen_dc, started, x, y, width, height);
     unsafe { ReleaseDC(None, screen_dc) };
     result
 }
 
 fn capture_with_dc(
     screen_dc: HDC,
+    started: Instant,
     x: i32,
     y: i32,
     width: u32,
@@ -74,6 +79,8 @@ fn capture_with_dc(
 
     let old = unsafe { SelectObject(mem_dc, bitmap.into()) };
 
+    let setup = started.elapsed();
+    let blit_started = Instant::now();
     let blit_ok = unsafe {
         BitBlt(
             mem_dc,
@@ -89,7 +96,10 @@ fn capture_with_dc(
     }
     .is_ok();
 
+    let captured = blit_started.elapsed();
+
     let out = if blit_ok {
+        let crop_started = Instant::now();
         let byte_len = (width as usize) * (height as usize) * 4;
         // SAFETY: CreateDIBSection allocated exactly this many bytes for a
         // 32-bit top-down bitmap of these dimensions, and the bitmap is still
@@ -114,6 +124,14 @@ fn capture_with_dc(
                     .into(),
             ))
         } else {
+            super::log_timing(
+                "gdi",
+                setup,
+                captured,
+                crop_started.elapsed(),
+                started.elapsed(),
+                (width, height),
+            );
             Ok(CapturedImage {
                 width,
                 height,

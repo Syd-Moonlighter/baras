@@ -9,7 +9,12 @@ mod windows;
 #[cfg(target_os = "windows")]
 use windows as backend;
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+mod unix;
+#[cfg(all(unix, not(target_os = "macos")))]
+use unix as backend;
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 mod backend {
     use super::{CaptureError, CapturedImage};
 
@@ -20,12 +25,79 @@ mod backend {
         _height: u32,
     ) -> Result<CapturedImage, CaptureError> {
         Err(CaptureError::Unsupported(
-            "raid-frame capture is currently available on Windows only".into(),
+            "raid-frame capture is not available on this platform".into(),
         ))
     }
 }
 
+/// Capture cost, on its own target so it can be filtered on or off by itself:
+/// `RUST_LOG=baras::capture=info`. Fires once per detect press.
+#[cfg_attr(
+    not(any(target_os = "windows", all(unix, not(target_os = "macos")))),
+    allow(dead_code)
+)]
+fn log_timing(
+    backend: &str,
+    setup: std::time::Duration,
+    captured: std::time::Duration,
+    cropped: std::time::Duration,
+    total: std::time::Duration,
+    region: (u32, u32),
+) {
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    tracing::info!(
+        target: "baras::capture",
+        backend,
+        setup_ms = ms(setup),
+        capture_ms = ms(captured),
+        crop_ms = ms(cropped),
+        total_ms = ms(total),
+        region = format!("{}x{}", region.0, region.1),
+        "raid-frame capture"
+    );
+}
+
+/// Map a global logical rectangle onto an output's capture buffer.
+///
+/// Buffers are device pixels, overlay geometry is logical. The factor comes from
+/// the sizes the compositor reported — `wl_output`'s own scale is an integer and
+/// wrong under fractional scaling.
+///
+/// Clamped to the buffer. `None` when the region lies outside it.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+pub(crate) fn device_region(
+    region: (i32, i32, u32, u32),
+    output_origin: (i32, i32),
+    logical_size: (u32, u32),
+    buffer_size: (u32, u32),
+) -> Option<(u32, u32, u32, u32)> {
+    let (logical_w, logical_h) = logical_size;
+    let (buffer_w, buffer_h) = buffer_size;
+    if logical_w == 0 || logical_h == 0 || buffer_w == 0 || buffer_h == 0 {
+        return None;
+    }
+
+    let scale_x = f64::from(buffer_w) / f64::from(logical_w);
+    let scale_y = f64::from(buffer_h) / f64::from(logical_h);
+
+    let left = (i64::from(region.0) - i64::from(output_origin.0)) as f64 * scale_x;
+    let top = (i64::from(region.1) - i64::from(output_origin.1)) as f64 * scale_y;
+    let right = left + f64::from(region.2) * scale_x;
+    let bottom = top + f64::from(region.3) * scale_y;
+
+    let x0 = left.round().clamp(0.0, f64::from(buffer_w)) as u32;
+    let y0 = top.round().clamp(0.0, f64::from(buffer_h)) as u32;
+    let x1 = right.round().clamp(0.0, f64::from(buffer_w)) as u32;
+    let y1 = bottom.round().clamp(0.0, f64::from(buffer_h)) as u32;
+
+    (x1 > x0 && y1 > y0).then_some((x0, y0, x1 - x0, y1 - y0))
+}
+
 /// A captured region, top-down, 4 bytes per pixel.
+///
+/// A scaled display returns more pixels than were asked for; downsampling would
+/// throw away detail recognition wants. Compare `width` against the requested
+/// width to recover the factor.
 #[derive(Debug)]
 pub struct CapturedImage {
     pub width: u32,
@@ -107,6 +179,58 @@ mod tests {
 
         assert_eq!(image.pixel(0, 0), None);
         assert!(image.crop(0, 0, 1, 1).is_none());
+    }
+
+    /// Scaling works on an unscaled machine and silently reads the wrong pixels
+    /// everywhere else, so it is tested here rather than against a compositor.
+    #[test]
+    fn device_region_scales_the_rectangle() {
+        // 1:1 — the region is already in device pixels.
+        assert_eq!(
+            device_region((100, 50, 400, 200), (0, 0), (1920, 1080), (1920, 1080)),
+            Some((100, 50, 400, 200))
+        );
+
+        // 2x HiDPI.
+        assert_eq!(
+            device_region((100, 50, 400, 200), (0, 0), (1920, 1080), (3840, 2160)),
+            Some((200, 100, 800, 400))
+        );
+
+        // 1.5x and 1.25x fractional — the cases wl_output's integer scale gets wrong.
+        assert_eq!(
+            device_region((100, 50, 400, 200), (0, 0), (1280, 720), (1920, 1080)),
+            Some((150, 75, 600, 300))
+        );
+        assert_eq!(
+            device_region((100, 40, 400, 200), (0, 0), (1536, 864), (1920, 1080)),
+            Some((125, 50, 500, 250))
+        );
+    }
+
+    #[test]
+    fn device_region_is_relative_to_its_output() {
+        // Second monitor starting at x=1920, captured at 2x.
+        assert_eq!(
+            device_region((2020, 50, 400, 200), (1920, 0), (1920, 1080), (3840, 2160)),
+            Some((200, 100, 800, 400))
+        );
+    }
+
+    #[test]
+    fn device_region_clamps_and_rejects_the_unusable() {
+        // Overhanging rectangles keep the part that lies on the output.
+        assert_eq!(
+            device_region((-50, -50, 200, 200), (0, 0), (1920, 1080), (1920, 1080)),
+            Some((0, 0, 150, 150))
+        );
+        // Entirely off the output.
+        assert_eq!(
+            device_region((4000, 0, 100, 100), (0, 0), (1920, 1080), (1920, 1080)),
+            None
+        );
+        // A compositor that reported nothing usable.
+        assert_eq!(device_region((0, 0, 100, 100), (0, 0), (0, 0), (1920, 1080)), None);
     }
 
     #[test]
