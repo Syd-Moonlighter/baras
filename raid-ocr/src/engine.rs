@@ -91,8 +91,10 @@ pub async fn ensure_model() -> Result<PathBuf, OcrError> {
     }
 
     // Write beside the target and rename, so an interrupted download cannot
-    // leave a truncated file that later loads as a corrupt model.
-    let temp = path.with_extension("part");
+    // leave a truncated file that later loads as a corrupt model. The temp name
+    // has to keep the `.rten` extension: `Model::load_file` picks its parser
+    // from the extension alone, and rejects anything else before reading a byte.
+    let temp = path.with_extension("part.rten");
     std::fs::write(&temp, &bytes)
         .map_err(|e| OcrError::ModelUnavailable(format!("cannot write model: {e}")))?;
     if let Err(e) = validate_model_file(&temp) {

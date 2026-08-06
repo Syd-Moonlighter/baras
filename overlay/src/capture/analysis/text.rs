@@ -1,5 +1,9 @@
 //! Parse text recognized from a raid-frame band.
 
+/// Anything outside this is two fields that ran together, not a reading.
+const MIN_VALUE_DIGITS: usize = 3;
+const MAX_VALUE_DIGITS: usize = 7;
+
 /// Parse the health text SWTOR prints in an ops frame.
 ///
 /// Reads `271,245 (55%)` into `(Some(271245), Some(55))`. Either half may be
@@ -13,18 +17,9 @@ pub fn parse_health_text(text: &str) -> (Option<u32>, Option<u8>) {
     // frame border that recognition reports as '|' or '[', and folding first
     // would turn it into a digit ('|' => '1') that then looks like part of the
     // value — `|333,269` read as 1,333,269.
-    let (value_part, percent_part) = match text.find('(') {
-        Some(idx) => (&text[..idx], &text[idx..]),
-        None => (text, ""),
-    };
+    let (value_part, percent_part) = split_percent(text);
 
-    let folded_percent = fold_digit_lookalikes(percent_part);
-    let percent = folded_percent
-        .split(['(', ')'])
-        .find_map(|chunk| chunk.trim().strip_suffix('%'))
-        .and_then(|digits| digits.trim().parse::<u32>().ok())
-        .filter(|p| *p <= 100)
-        .map(|p| p as u8);
+    let percent = parse_percent(&fold_digit_lookalikes(percent_part));
 
     // Nothing that cannot begin a number may lead the value. Splitting the
     // parenthesised part off first means this cannot eat a '(' and mistake a
@@ -33,6 +28,42 @@ pub fn parse_health_text(text: &str) -> (Option<u32>, Option<u8>) {
     let value = parse_grouped_value(&fold_digit_lookalikes(trimmed));
 
     (value, percent)
+}
+
+/// Split the value from the parenthesised percentage.
+///
+/// A real '(' always opens it. A bracket only does so after digits: the same
+/// shape at the start of the line is the frame border the crop's left edge
+/// picked up, and splitting there would throw the value away.
+fn split_percent(text: &str) -> (&str, &str) {
+    let mut seen_digit = false;
+    for (idx, c) in text.char_indices() {
+        match c {
+            '(' => return (&text[..idx], &text[idx..]),
+            '[' | '{' if seen_digit => return (&text[..idx], &text[idx..]),
+            c if c.is_ascii_digit() => seen_digit = true,
+            _ => {}
+        }
+    }
+    (text, "")
+}
+
+/// Parse the percentage, with or without a surviving '%'.
+///
+/// Only digits and '%' are rendered between the parentheses, so a bare number
+/// that could be a percentage is one. Recognition drops the '%' more often than
+/// it reads it, and turns it into '9' or '99' when it does; not looking for the
+/// glyph at all sidesteps both.
+fn parse_percent(folded: &str) -> Option<u8> {
+    folded
+        .split(['(', ')', '[', ']', '{', '}'])
+        .filter_map(|chunk| {
+            let chunk = chunk.trim();
+            let digits = chunk.strip_suffix('%').unwrap_or(chunk).trim();
+            digits.parse::<u32>().ok()
+        })
+        .find(|percent| *percent <= 100)
+        .map(|percent| percent as u8)
 }
 
 /// Fold the letters recognition substitutes for digits at raid-frame sizes.
@@ -65,27 +96,28 @@ fn parse_grouped_value(folded: &str) -> Option<u32> {
         .map(|group| group.chars().filter(char::is_ascii_digit).collect())
         .collect();
 
-    let digits: String = match groups.split_first() {
-        // No separator, or a shape SWTOR never renders: fall back to the raw
-        // digit run rather than discarding a possibly-good read.
-        None => return None,
-        Some((first, rest)) if rest.is_empty() || rest.iter().any(|g| g.len() != 3) => {
-            let _ = first;
-            folded.chars().filter(char::is_ascii_digit).collect()
-        }
-        Some((first, rest)) => {
-            let first = if first.len() > 3 {
-                &first[first.len() - 3..]
-            } else {
-                first.as_str()
-            };
-            std::iter::once(first)
-                .chain(rest.iter().map(String::as_str))
-                .collect()
-        }
+    let (first, rest) = groups.split_first()?;
+
+    let digits: String = if rest.is_empty() {
+        // No separator survived, so there is no structure left to check.
+        first.clone()
+    } else if rest.iter().any(|group| group.len() != 3) {
+        // A shape SWTOR never renders: a delimiter was misread and the groups
+        // ran together. Concatenating anyway is how `462,769 (93%)` became
+        // 462759193, a number with no sign of being wrong on it.
+        return None;
+    } else {
+        let first = if first.len() > 3 {
+            &first[first.len() - 3..]
+        } else {
+            first.as_str()
+        };
+        std::iter::once(first)
+            .chain(rest.iter().map(String::as_str))
+            .collect()
     };
 
-    if digits.len() < 3 {
+    if !(MIN_VALUE_DIGITS..=MAX_VALUE_DIGITS).contains(&digits.len()) {
         return None;
     }
     digits.parse::<u32>().ok()
@@ -177,4 +209,40 @@ mod tests {
         assert_eq!(parse_health_text("(255%)"), (None, None));
     }
 
+    /// A misread '(' merges value and percentage into one digit run. All of
+    /// these read as confident nine-digit health values before.
+    #[test]
+    fn fields_that_ran_together_are_rejected_not_concatenated() {
+        // 462,769 (93%) — the '(' read as '1'.
+        assert_eq!(parse_health_text("[ 462,759193)").0, None);
+        // 440,917 (100%) — a digit lost, leaving a two-digit second group.
+        assert_eq!(parse_health_text("[440.97(100%)").0, None);
+        // 442,565 (100%) — leading digit lost to a '?'.
+        assert_eq!(parse_health_text("[?42,55 [10%)").0, None);
+    }
+
+    /// The bracket opening the percentage and the one the crop's left edge
+    /// invents are the same glyph; only the digits before it tell them apart.
+    #[test]
+    fn a_bracket_opens_the_percentage_only_after_digits() {
+        // 391,830 (100%): leading '[' is the frame border, the second opens the
+        // percentage. Reading both as noise concatenated them into 391830100.
+        assert_eq!(
+            parse_health_text("[391.830[100)"),
+            (Some(391_830), Some(100))
+        );
+        assert_eq!(parse_health_text("! 204111(46%)]"), (Some(204_111), Some(46)));
+        // A real '(' still opens it with no value in front.
+        assert_eq!(parse_health_text("(76%)"), (None, Some(76)));
+    }
+
+    /// The '%' is dropped more often than read, so the digits carry it.
+    #[test]
+    fn the_percentage_survives_a_lost_percent_sign() {
+        assert_eq!(parse_health_text("417.073 (85)").1, Some(85));
+        // Truncated before the closing bracket.
+        assert_eq!(parse_health_text("373590 (85").1, Some(85));
+        // '%' read as '9' pushes the group over 100, which is still a misread.
+        assert_eq!(parse_health_text("[ 325.152 (8199)"), (Some(325_152), None));
+    }
 }

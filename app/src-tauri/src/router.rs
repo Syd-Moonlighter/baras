@@ -262,16 +262,30 @@ async fn detect_raid_names(
         let mut dump = dump_enabled
             .then(|| baras_raid_ocr::DebugDump::new(slot_count))
             .flatten();
+        let read_started = std::time::Instant::now();
         let observations =
             baras_raid_ocr::observe_slots_dumping(&image, &slots, dump.as_mut());
+        let read = read_started.elapsed();
         if let Some(dump) = dump {
             dump.finish();
         }
+
+        let match_started = std::time::Instant::now();
         let (assignments, decisions) = baras_core::raid_detect::assign_rows_explained(
             &observations,
             &candidates,
             &baras_core::raid_detect::MatchConfig::default(),
         );
+        // Completes the picture the capture timing starts.
+        tracing::info!(
+            target: "baras::raid_detect",
+            read_ms = read.as_secs_f64() * 1000.0,
+            match_ms = match_started.elapsed().as_secs_f64() * 1000.0,
+            rows = observations.len(),
+            candidates = candidate_count,
+            "raid name detection"
+        );
+
         RaidOcrResult {
             observations,
             assignments,

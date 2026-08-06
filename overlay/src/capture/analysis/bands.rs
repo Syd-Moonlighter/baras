@@ -229,30 +229,49 @@ fn last_run_at_least(
 }
 
 /// Pull clear vertical outliers back to the grid median.
+/// Fewer readable slots than this and there is no consensus worth trusting.
+const MIN_CONSENSUS_SLOTS: usize = 3;
+
 pub fn harmonize(per_slot: &mut [Vec<Band>]) {
     for kind in [BandKind::Name, BandKind::Health] {
-        let tops: Vec<u32> = per_slot
+        // Bottoms, not tops: icons above the text stretch a band upward, never
+        // down, so the bottom is the edge the slots agree on.
+        let found: Vec<(u32, u32)> = per_slot
             .iter()
-            .filter_map(|bands| bands.iter().find(|b| b.kind == kind).map(|b| b.top))
+            .filter_map(|bands| {
+                bands
+                    .iter()
+                    .find(|b| b.kind == kind)
+                    .map(|b| (b.height, b.top + b.height))
+            })
             .collect();
 
-        if tops.len() < 2 {
+        if found.len() < MIN_CONSENSUS_SLOTS {
             continue;
         }
 
-        let consensus_top = median(&tops);
-        let heights: Vec<u32> = per_slot
-            .iter()
-            .filter_map(|bands| bands.iter().find(|b| b.kind == kind).map(|b| b.height))
-            .collect();
+        let heights: Vec<u32> = found.iter().map(|(height, _)| *height).collect();
+        let bottoms: Vec<u32> = found.iter().map(|(_, bottom)| *bottom).collect();
         let consensus_height = median(&heights);
+        let consensus_bottom = median(&bottoms);
+        // Scales with the frame size.
+        let tolerance = (consensus_height * 2 / 5).max(2);
+
+        if drifting(&bottoms, tolerance) {
+            continue;
+        }
 
         for bands in per_slot.iter_mut() {
             if let Some(band) = bands.iter_mut().find(|b| b.kind == kind) {
-                // Only correct clear outliers; small variation is just noise in
-                // the row profile and the crop padding absorbs it.
-                if band.top.abs_diff(consensus_top) > consensus_height.max(2) {
-                    band.top = consensus_top;
+                let bottom = band.top + band.height;
+                let too_tall = band.height.abs_diff(consensus_height) > tolerance;
+                let displaced = bottom.abs_diff(consensus_bottom) > tolerance;
+
+                // Small variation is row-profile noise and the padding absorbs
+                // it. A band that only grew upward keeps its own bottom edge.
+                if too_tall || displaced {
+                    let anchor = if displaced { consensus_bottom } else { bottom };
+                    band.top = anchor.saturating_sub(consensus_height);
                     band.height = consensus_height;
                 }
             }
@@ -260,10 +279,27 @@ pub fn harmonize(per_slot: &mut [Vec<Band>]) {
     }
 }
 
+/// Whether the bottoms trend one way down the slots instead of scattering.
+///
+/// That is the overlay grid not matching the game's, so the bands really do sit
+/// at different offsets and a consensus would make every slot equally wrong.
+fn drifting(bottoms: &[u32], tolerance: u32) -> bool {
+    let (Some(min), Some(max)) = (bottoms.iter().min(), bottoms.iter().max()) else {
+        return false;
+    };
+    if max - min <= tolerance {
+        return false;
+    }
+    // Strictly, so one slot jumping while the rest agree stays an outlier.
+    bottoms.windows(2).all(|w| w[0] < w[1]) || bottoms.windows(2).all(|w| w[0] > w[1])
+}
+
+/// Lower middle on an even count, so tall bands cannot drag the consensus up
+/// toward themselves.
 fn median(values: &[u32]) -> u32 {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
-    sorted[sorted.len() / 2]
+    sorted[(sorted.len() - 1) / 2]
 }
 
 #[cfg(test)]
@@ -442,5 +478,89 @@ mod tests {
 
         assert_eq!(slots[1][0].top, 11);
         assert_eq!(slots[2][0].top, 12);
+    }
+
+    /// Bands measured off a live 8-man frame. Slots 4 and 7 swallowed the icons
+    /// above the text: tops ten pixels high, bottoms unchanged.
+    #[test]
+    fn harmonize_trims_a_band_that_only_grew_upward() {
+        let observed = [
+            (13, 9),
+            (10, 13),
+            (13, 10),
+            (13, 10),
+            (3, 19),
+            (10, 13),
+            (12, 11),
+            (4, 19),
+        ];
+        let mut slots: Vec<Vec<Band>> = observed
+            .iter()
+            .map(|&(top, height)| {
+                vec![Band {
+                    top,
+                    height,
+                    kind: BandKind::Name,
+                }]
+            })
+            .collect();
+
+        harmonize(&mut slots);
+
+        for (slot, band) in slots.iter().enumerate() {
+            let band = band[0];
+            assert!(
+                band.height <= 13,
+                "slot {slot} kept an over-tall band: {band:?}"
+            );
+            assert_eq!(
+                band.top + band.height,
+                observed[slot].0 + observed[slot].1,
+                "slot {slot} must keep its own bottom edge"
+            );
+        }
+        // The slots that agreed are untouched.
+        assert_eq!((slots[0][0].top, slots[0][0].height), (13, 9));
+        assert_eq!((slots[6][0].top, slots[6][0].height), (12, 11));
+    }
+
+    /// Bands creeping one way are a misaligned overlay, not misdetection.
+    #[test]
+    fn harmonize_leaves_a_drifting_grid_alone() {
+        let mut slots: Vec<Vec<Band>> = [3, 6, 9, 12, 15, 18]
+            .iter()
+            .map(|&top| {
+                vec![Band {
+                    top,
+                    height: 6,
+                    kind: BandKind::Name,
+                }]
+            })
+            .collect();
+
+        harmonize(&mut slots);
+
+        assert_eq!(slots[0][0].top, 3);
+        assert_eq!(slots[5][0].top, 18);
+    }
+
+    /// Two readable slots agree about nothing worth acting on.
+    #[test]
+    fn harmonize_needs_enough_slots_to_have_an_opinion() {
+        let mut slots = vec![
+            vec![Band {
+                top: 10,
+                height: 6,
+                kind: BandKind::Name,
+            }],
+            vec![Band {
+                top: 30,
+                height: 6,
+                kind: BandKind::Name,
+            }],
+        ];
+        harmonize(&mut slots);
+
+        assert_eq!(slots[1][0].top, 30, "too few slots to override anything");
     }
 }
