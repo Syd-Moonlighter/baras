@@ -12,7 +12,7 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use baras_overlay::capture::CapturedImage;
-use baras_overlay::capture::analysis::{Band, BandKind, PreparedCrop};
+use crate::analysis::{Band, BandKind, PreparedCrop};
 
 /// Where dumps are written: `<config>/baras/ocr-debug/<timestamp>/`.
 fn session_dir() -> Option<PathBuf> {

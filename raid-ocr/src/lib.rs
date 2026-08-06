@@ -3,18 +3,17 @@
 //! This is separate from Tauri so recorded frames can run through the same
 //! pipeline as live captures. Unreadable rows stay unassigned.
 
+pub mod analysis;
 pub mod debug_dump;
 pub mod engine;
 
 pub use debug_dump::DebugDump;
 
+use analysis::{BandKind, detect_bands, harmonize, parse_health_text, prepare};
 use baras_core::raid_detect::{
     MIN_OCR_NAME_CHARS, MatchConfig, PlayerCandidate, RowAssignment, RowObservation,
 };
 use baras_overlay::capture::CapturedImage;
-use baras_overlay::capture::analysis::{
-    BandKind, detect_bands, harmonize, parse_health_text, prepare,
-};
 
 /// A slot rectangle within the captured overlay image.
 pub type SlotRect = (u8, i32, i32, u32, u32);

@@ -2,8 +2,6 @@
 //!
 //! Captures include the overlay itself, so callers blank it first.
 
-pub mod analysis;
-
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]

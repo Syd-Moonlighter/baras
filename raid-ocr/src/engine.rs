@@ -11,7 +11,7 @@ use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
 use rten_imageproc::{Rect, RotatedRect};
 
-use baras_overlay::capture::analysis::PreparedCrop;
+use crate::analysis::PreparedCrop;
 
 /// Upstream distribution point for the ocrs recognition model (~10 MB).
 const RECOGNITION_MODEL_URL: &str =

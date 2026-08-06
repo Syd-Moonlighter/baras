@@ -3,7 +3,7 @@
 //! Names are light-on-dark; health text sits on a red bar. Band positions are
 //! reconciled across slots because markers can throw off one row profile.
 
-use crate::capture::CapturedImage;
+use baras_overlay::capture::CapturedImage;
 
 /// A horizontal strip within a slot believed to contain text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

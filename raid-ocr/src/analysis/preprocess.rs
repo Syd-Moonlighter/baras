@@ -3,7 +3,7 @@
 //! Crops are contrast-stretched and scaled to the
 //! recognition model's 32 px input height.
 
-use crate::capture::CapturedImage;
+use baras_overlay::capture::CapturedImage;
 
 use super::bands::{Band, BandKind, NAME_SCAN_FRACTION};
 
