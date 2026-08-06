@@ -122,8 +122,89 @@ async fn process_registry_action(
 struct RaidOcrResult {
     observations: Vec<baras_core::raid_detect::RowObservation>,
     assignments: Vec<baras_core::raid_detect::RowAssignment>,
+    decisions: Vec<baras_core::raid_detect::RowDecision>,
 }
 
+/// One log line per row: what was read, what it was matched to, and why.
+fn raid_row_lines(
+    observations: &[baras_core::raid_detect::RowObservation],
+    decisions: &[baras_core::raid_detect::RowDecision],
+) -> Vec<String> {
+    use baras_core::raid_detect::{CandidateScore, Contribution};
+
+    let health = |row: usize| {
+        observations
+            .iter()
+            .find(|o| o.row == row)
+            .map(|o| {
+                let value = o.hp_value.map_or("-".to_string(), |v| v.to_string());
+                let percent = o.hp_percent.map_or("-".to_string(), |p| format!("{p}%"));
+                format!("hp={value} {percent}")
+            })
+            .unwrap_or_default()
+    };
+
+    // Only signals that moved the score are worth printing; a health reading
+    // that disagreed contributed nothing and says nothing.
+    let support = |score: &CandidateScore| {
+        let part = |label: &str, c: Option<Contribution>| {
+            c.map(|c| {
+                format!(
+                    ", {label} {:.2}{}",
+                    c.score,
+                    if c.counted { "" } else { " (ignored)" }
+                )
+            })
+            .unwrap_or_default()
+        };
+        format!(
+            "name {:.2}{}{}",
+            score.name_score,
+            part("hp", score.hp_value),
+            part("hp%", score.hp_percent)
+        )
+    };
+
+    decisions
+        .iter()
+        .map(|d| {
+            let read = d.observed.as_deref().unwrap_or("");
+            let head = format!(
+                "slot {:<2} read {read:?} -> {} {}",
+                d.row,
+                d.normalized.as_deref().unwrap_or("(nothing)"),
+                health(d.row)
+            );
+
+            match (&d.assigned, &d.best, d.rejected) {
+                (Some(a), _, _) => format!(
+                    "{head} | {} conf {:.2} ({}), margin {:.2}",
+                    a.name,
+                    a.total,
+                    support(a),
+                    a.total - d.runner_up
+                ),
+                (None, Some(best), reason) => format!(
+                    "{head} | unassigned: {}; closest {} at {:.2} ({})",
+                    reason.unwrap_or("no reason recorded"),
+                    best.name,
+                    best.total.max(best.name_score),
+                    support(best)
+                ),
+                (None, None, reason) => {
+                    format!("{head} | unassigned: {}", reason.unwrap_or("no candidates"))
+                }
+            }
+        })
+        .collect()
+}
+
+/// Progress is reported against rows, not against the roster.
+///
+/// The roster is every player the log has seen recently, which can legitimately
+/// hold more people than there are frames — a swap mid-session leaves both. A
+/// perfect read of eight frames used to print `matched 8/9` and read as a
+/// failure, so the roster size is now context rather than a denominator.
 fn raid_detection_message(
     slot_count: usize,
     names_read: usize,
@@ -145,10 +226,10 @@ fn raid_detection_message(
         return format!("{prefix}; no roster; {registry_state}");
     }
 
-    if matched == candidate_count && provisional == 0 {
-        format!("{prefix}; matched all {matched} log players")
+    if matched == names_read && provisional == 0 {
+        format!("{prefix}; matched all {matched} (roster {candidate_count})")
     } else {
-        format!("{prefix}; matched {matched}/{candidate_count}; {registry_state}")
+        format!("{prefix}; matched {matched}/{names_read} rows (roster {candidate_count}); {registry_state}")
     }
 }
 
@@ -169,20 +250,32 @@ async fn detect_raid_names(
 
     let slot_count = slots.len();
     let candidate_count = candidates.len();
+    let dump_enabled = service_handle
+        .shared
+        .config
+        .read()
+        .await
+        .overlay_settings
+        .raid_overlay
+        .ocr_debug_dump;
     let result = tokio::task::spawn_blocking(move || {
-        let observations = baras_raid_ocr::observe_slots(&image, &slots);
-        let assignments = if candidates.is_empty() {
-            Vec::new()
-        } else {
-            baras_core::raid_detect::assign_rows(
-                &observations,
-                &candidates,
-                &baras_core::raid_detect::MatchConfig::default(),
-            )
-        };
+        let mut dump = dump_enabled
+            .then(|| baras_raid_ocr::DebugDump::new(slot_count))
+            .flatten();
+        let observations =
+            baras_raid_ocr::observe_slots_dumping(&image, &slots, dump.as_mut());
+        if let Some(dump) = dump {
+            dump.finish();
+        }
+        let (assignments, decisions) = baras_core::raid_detect::assign_rows_explained(
+            &observations,
+            &candidates,
+            &baras_core::raid_detect::MatchConfig::default(),
+        );
         RaidOcrResult {
             observations,
             assignments,
+            decisions,
         }
     })
     .await;
@@ -199,17 +292,11 @@ async fn detect_raid_names(
     let RaidOcrResult {
         observations,
         assignments,
+        decisions,
     } = result;
-    let details = observations
-        .iter()
-        .map(|row| {
-            format!(
-                "{}={:?} hp={:?}/{:?}%",
-                row.row, row.name_text, row.hp_value, row.hp_percent
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
+    for line in raid_row_lines(&observations, &decisions) {
+        tracing::info!(target: "baras::raid_detect", "{line}");
+    }
     let mut names = baras_raid_ocr::ocr_only_names(&observations);
     let names_read = names.len();
     names.retain(|(row, _)| !assignments.iter().any(|a| a.row == *row as usize));
@@ -219,7 +306,6 @@ async fn detect_raid_names(
         tracing::info!(
             elapsed_ms,
             candidate_count,
-            observations = %details,
             "Raid name detection could not read any names"
         );
         let _ = result_tx.send("No names read; check the raid-frame alignment".into());
@@ -241,7 +327,6 @@ async fn detect_raid_names(
         provisional,
         retained,
         candidate_count,
-        observations = %details,
         "Raid name detection complete"
     );
 
@@ -848,15 +933,25 @@ mod raid_detection_message_tests {
         );
         assert_eq!(
             raid_detection_message(8, 6, 6, 8, 0, 8),
-            "OCR 6/8; matched 6/8; 2 retained"
+            "OCR 6/8; matched all 6 (roster 8)"
         );
         assert_eq!(
             raid_detection_message(8, 8, 8, 8, 0, 8),
-            "OCR 8/8; matched all 8 log players"
+            "OCR 8/8; matched all 8 (roster 8)"
         );
         assert_eq!(
             raid_detection_message(8, 8, 6, 8, 1, 7),
-            "OCR 8/8; matched 6/8; 1 retained, 1 provisional"
+            "OCR 8/8; matched 6/8 rows (roster 8); 1 retained, 1 provisional"
+        );
+    }
+
+    /// The case that used to read `matched 8/9` and look like a failure: every
+    /// frame matched, but the log had seen a ninth player.
+    #[test]
+    fn a_roster_larger_than_the_frame_count_is_not_a_failure() {
+        assert_eq!(
+            raid_detection_message(8, 8, 8, 9, 0, 8),
+            "OCR 8/8; matched all 8 (roster 9)"
         );
     }
 }

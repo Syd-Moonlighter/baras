@@ -126,6 +126,29 @@ fn hp_percent_score(observed: u8, candidate: &PlayerCandidate) -> f32 {
     }
 }
 
+/// One health signal's contribution to a score.
+#[derive(Debug, Clone, Copy)]
+pub struct Contribution {
+    /// What the reading scored against the candidate.
+    pub score: f32,
+    /// Whether it was strong enough to be folded into the total.
+    pub counted: bool,
+}
+
+/// How one row scored against one candidate.
+#[derive(Debug, Clone)]
+pub struct CandidateScore {
+    pub entity_id: i64,
+    pub name: String,
+    pub total: f32,
+    pub name_score: f32,
+    /// Present when the row carried an absolute health reading and the
+    /// candidate had health to compare it against.
+    pub hp_value: Option<Contribution>,
+    /// Present when the row carried a percentage and the candidate had one.
+    pub hp_percent: Option<Contribution>,
+}
+
 /// Combined score for one row against one candidate, in `0.0..=1.0`.
 fn combined_score(
     observation: &RowObservation,
@@ -133,21 +156,42 @@ fn combined_score(
     candidate: &PlayerCandidate,
     config: &MatchConfig,
 ) -> f32 {
+    score_parts(observation, normalized_name, candidate, config).total
+}
+
+/// [`combined_score`], keeping the pieces so they can be logged.
+fn score_parts(
+    observation: &RowObservation,
+    normalized_name: Option<&str>,
+    candidate: &PlayerCandidate,
+    config: &MatchConfig,
+) -> CandidateScore {
+    let mut parts = CandidateScore {
+        entity_id: candidate.entity_id,
+        name: candidate.name.clone(),
+        total: 0.0,
+        name_score: 0.0,
+        hp_value: None,
+        hp_percent: None,
+    };
+
     let Some(name) = normalized_name else {
-        return 0.0;
+        return parts;
     };
     let Some(name_score) = name_score(name, candidate) else {
-        return 0.0;
+        return parts;
     };
+    parts.name_score = name_score;
 
     // Health is supporting evidence, never identity. It cannot rescue a name
     // that is too weak to stand on its own.
     if name_score < config.min_confidence {
-        return 0.0;
+        return parts;
     }
 
     if config.name_weight <= 0.0 {
-        return name_score;
+        parts.total = name_score;
+        return parts;
     }
     let mut weighted = name_score * config.name_weight;
     let mut total_weight = config.name_weight;
@@ -158,23 +202,47 @@ fn combined_score(
         && (candidate.current_hp > 0 || candidate.max_hp > 0)
     {
         let s = hp_value_score(hp, candidate);
-        if s >= STRONG_HEALTH && config.hp_value_weight > 0.0 {
+        let counted = s >= STRONG_HEALTH && config.hp_value_weight > 0.0;
+        if counted {
             weighted += s * config.hp_value_weight;
             total_weight += config.hp_value_weight;
         }
+        parts.hp_value = Some(Contribution { score: s, counted });
     }
     if let Some(pct) = observation.hp_percent
         && candidate.hp_percent().is_some()
     {
         let s = hp_percent_score(pct, candidate);
-        if s >= STRONG_HEALTH && config.hp_percent_weight > 0.0 {
+        let counted = s >= STRONG_HEALTH && config.hp_percent_weight > 0.0;
+        if counted {
             weighted += s * config.hp_percent_weight;
             total_weight += config.hp_percent_weight;
         }
+        parts.hp_percent = Some(Contribution { score: s, counted });
     }
 
     // Supporting evidence may improve a name score, but must never reduce it.
-    name_score.max(weighted / total_weight).clamp(0.0, 1.0)
+    parts.total = name_score.max(weighted / total_weight).clamp(0.0, 1.0);
+    parts
+}
+
+/// What happened to one row. Diagnostics only — nothing reads this to decide.
+#[derive(Debug, Clone)]
+pub struct RowDecision {
+    pub row: usize,
+    /// The reading as OCR produced it.
+    pub observed: Option<String>,
+    /// The reading after normalization, when anything survived.
+    pub normalized: Option<String>,
+    /// Candidate the row was given.
+    pub assigned: Option<CandidateScore>,
+    /// Best candidate for this row alone, which is not always the one it was
+    /// given — assignment is global.
+    pub best: Option<CandidateScore>,
+    /// Score of the next-best candidate behind `best`.
+    pub runner_up: f32,
+    /// Why the row went unassigned.
+    pub rejected: Option<&'static str>,
 }
 
 /// Match raid-frame rows to log players.
@@ -185,8 +253,17 @@ pub fn assign_rows(
     candidates: &[PlayerCandidate],
     config: &MatchConfig,
 ) -> Vec<RowAssignment> {
-    if observations.is_empty() || candidates.is_empty() {
-        return Vec::new();
+    assign_rows_explained(observations, candidates, config).0
+}
+
+/// [`assign_rows`], with the reasoning behind every row.
+pub fn assign_rows_explained(
+    observations: &[RowObservation],
+    candidates: &[PlayerCandidate],
+    config: &MatchConfig,
+) -> (Vec<RowAssignment>, Vec<RowDecision>) {
+    if observations.is_empty() {
+        return (Vec::new(), Vec::new());
     }
 
     // Normalize each reading once rather than per candidate.
@@ -200,38 +277,103 @@ pub fn assign_rows(
         })
         .collect();
 
-    // scores[row][candidate]
-    let scores: Vec<Vec<f32>> = observations
+    if candidates.is_empty() {
+        let decisions = observations
+            .iter()
+            .zip(&normalized)
+            .map(|(obs, norm)| RowDecision {
+                row: obs.row,
+                observed: obs.name_text.clone(),
+                normalized: norm.clone(),
+                assigned: None,
+                best: None,
+                runner_up: 0.0,
+                rejected: Some("no roster to match against"),
+            })
+            .collect();
+        return (Vec::new(), decisions);
+    }
+
+    // parts[row][candidate], with scores[row][candidate] derived from it.
+    let parts: Vec<Vec<CandidateScore>> = observations
         .iter()
         .zip(&normalized)
         .map(|(obs, norm)| {
             candidates
                 .iter()
-                .map(|c| combined_score(obs, norm.as_deref(), c, config))
+                .map(|c| score_parts(obs, norm.as_deref(), c, config))
                 .collect()
         })
+        .collect();
+    let scores: Vec<Vec<f32>> = parts
+        .iter()
+        .map(|row| row.iter().map(|p| p.total).collect())
         .collect();
 
     let assigned = solve_assignment(&scores, config.min_confidence);
 
     // Do not let assignment by elimination turn two near-ties into two guesses.
     let mut out = Vec::new();
+    let mut decisions = Vec::with_capacity(observations.len());
+
     for (row_idx, &candidate_idx) in assigned.iter().enumerate() {
+        // Report the row's own best even when the solver gave it to someone
+        // else, and fall back to the closest name when nothing scored at all —
+        // "closest was X at 0.58" says more than "no match".
+        let best_idx = best_by(&parts[row_idx], |p| p.total)
+            .filter(|&i| parts[row_idx][i].total > 0.0)
+            .or_else(|| {
+                best_by(&parts[row_idx], |p| p.name_score)
+                    .filter(|&i| parts[row_idx][i].name_score > 0.0)
+            });
+        let best = best_idx.map(|i| parts[row_idx][i].clone());
+        let runner_up = best_idx.map_or(0.0, |best_idx| {
+            scores[row_idx]
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != best_idx)
+                .map(|(_, &s)| s)
+                .fold(0.0f32, f32::max)
+        });
+
+        let mut decision = RowDecision {
+            row: observations[row_idx].row,
+            observed: observations[row_idx].name_text.clone(),
+            normalized: normalized[row_idx].clone(),
+            assigned: None,
+            best,
+            runner_up,
+            rejected: None,
+        };
+
         let Some(candidate_idx) = candidate_idx else {
+            decision.rejected = Some(if normalized[row_idx].is_none() {
+                "no readable name"
+            } else if decision.best.as_ref().is_some_and(|b| b.total > 0.0) {
+                "every matching player went to a better row"
+            } else {
+                "no candidate above min_confidence"
+            });
+            decisions.push(decision);
             continue;
         };
-        let score = scores[row_idx][candidate_idx];
 
-        let runner_up = scores[row_idx]
+        let score = scores[row_idx][candidate_idx];
+        let margin_runner_up = scores[row_idx]
             .iter()
             .enumerate()
             .filter(|&(i, _)| i != candidate_idx)
             .map(|(_, &s)| s)
             .fold(0.0f32, f32::max);
 
-        if score - runner_up < config.min_margin {
+        if score - margin_runner_up < config.min_margin {
+            decision.rejected = Some("too close to the next-best candidate");
+            decisions.push(decision);
             continue;
         }
+
+        decision.assigned = Some(parts[row_idx][candidate_idx].clone());
+        decisions.push(decision);
 
         out.push(RowAssignment {
             row: observations[row_idx].row,
@@ -241,7 +383,20 @@ pub fn assign_rows(
         });
     }
 
-    out
+    (out, decisions)
+}
+
+/// Index of the highest-scoring entry, by the given measure.
+fn best_by(parts: &[CandidateScore], measure: impl Fn(&CandidateScore) -> f32) -> Option<usize> {
+    parts
+        .iter()
+        .enumerate()
+        .max_by(|a, b| {
+            measure(a.1)
+                .partial_cmp(&measure(b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
 }
 
 /// Greedy assignment with pairwise score improvements.

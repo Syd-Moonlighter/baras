@@ -818,8 +818,10 @@ version = "0.1.0"
 dependencies = [
  "baras-core",
  "baras-overlay",
+ "chrono",
  "dirs",
  "ocrs",
+ "png 0.17.16",
  "reqwest 0.12.28",
  "rten",
  "rten-imageproc",

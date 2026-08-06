@@ -3,7 +3,10 @@
 //! This is separate from Tauri so recorded frames can run through the same
 //! pipeline as live captures. Unreadable rows stay unassigned.
 
+pub mod debug_dump;
 pub mod engine;
+
+pub use debug_dump::DebugDump;
 
 use baras_core::raid_detect::{
     MIN_OCR_NAME_CHARS, MatchConfig, PlayerCandidate, RowAssignment, RowObservation,
@@ -58,6 +61,22 @@ fn clean_for_display(text: &str) -> String {
 ///
 /// Empty slots are omitted.
 pub fn observe_slots(image: &CapturedImage, slots: &[SlotRect]) -> Vec<RowObservation> {
+    observe_slots_dumping(image, slots, None)
+}
+
+/// [`observe_slots`], optionally recording every crop and reading to disk.
+///
+/// The dump lives here because this is the only place a crop and the text it
+/// produced exist at the same time.
+pub fn observe_slots_dumping(
+    image: &CapturedImage,
+    slots: &[SlotRect],
+    mut dump: Option<&mut DebugDump>,
+) -> Vec<RowObservation> {
+    if let Some(dump) = dump.as_deref_mut() {
+        dump.capture(image);
+    }
+
     // Find every band first so outliers can be corrected across the grid.
     let mut slot_images = Vec::with_capacity(slots.len());
     let mut per_slot_bands = Vec::with_capacity(slots.len());
@@ -85,6 +104,16 @@ pub fn observe_slots(image: &CapturedImage, slots: &[SlotRect]) -> Vec<RowObserv
             continue;
         };
 
+        if let Some(dump) = dump.as_deref_mut() {
+            dump.slot(
+                slot_rect.0,
+                (slot_rect.1, slot_rect.2, slot_rect.3, slot_rect.4),
+            );
+            if slot_bands.is_empty() {
+                dump.no_bands(slot_rect.0);
+            }
+        }
+
         let mut observation = RowObservation {
             row: slot_rect.0 as usize,
             ..Default::default()
@@ -93,24 +122,50 @@ pub fn observe_slots(image: &CapturedImage, slots: &[SlotRect]) -> Vec<RowObserv
 
         for band in slot_bands {
             let Some(crop) = prepare(slot_image, band) else {
+                if let Some(dump) = dump.as_deref_mut() {
+                    dump.band_skipped(band, "band lies outside the slot");
+                }
                 continue;
             };
             let text = match engine::recognize(&crop) {
                 Ok(text) if !text.trim().is_empty() => text,
-                Ok(_) => continue,
+                Ok(_) => {
+                    if let Some(dump) = dump.as_deref_mut() {
+                        dump.band(slot_rect.0, band, &crop, "", "empty reading");
+                    }
+                    continue;
+                }
                 Err(e) => {
                     tracing::debug!("Slot {} band {:?} unreadable: {e}", slot_rect.0, band.kind);
+                    if let Some(dump) = dump.as_deref_mut() {
+                        dump.band(slot_rect.0, band, &crop, "", &format!("unreadable: {e}"));
+                    }
                     continue;
                 }
             };
 
             match band.kind {
                 BandKind::Name => {
+                    if let Some(dump) = dump.as_deref_mut() {
+                        let outcome = format!("display={:?}", clean_for_display(&text));
+                        dump.band(slot_rect.0, band, &crop, &text, &outcome);
+                    }
                     observation.name_text = Some(text);
                     saw_anything = true;
                 }
                 BandKind::Health => {
                     let (value, percent) = parse_health_text(&text);
+                    if let Some(dump) = dump.as_deref_mut() {
+                        let outcome = match (value, percent) {
+                            (None, None) => "parsed nothing".to_string(),
+                            (v, p) => format!(
+                                "value={} percent={}",
+                                v.map_or("-".into(), |v| v.to_string()),
+                                p.map_or("-".into(), |p| p.to_string())
+                            ),
+                        };
+                        dump.band(slot_rect.0, band, &crop, &text, &outcome);
+                    }
                     observation.hp_value = value;
                     observation.hp_percent = percent;
                     saw_anything |= value.is_some() || percent.is_some();

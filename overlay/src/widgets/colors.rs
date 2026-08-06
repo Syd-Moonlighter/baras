@@ -225,6 +225,18 @@ pub fn raid_overflow() -> Color {
     Color::from_rgba8(255, 180, 100, 200)
 }
 
+/// OCR name not yet tied to a log player. Shares [`raid_overflow`]'s orange.
+#[inline]
+pub fn raid_name_provisional() -> Color {
+    Color::from_rgba8(255, 180, 100, 255)
+}
+
+/// Name backed by a log player. Shares [`health_high`]'s green.
+#[inline]
+pub fn raid_name_confirmed() -> Color {
+    Color::from_rgba8(80, 200, 80, 255)
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Health Bar Colors (contextual)
 // ─────────────────────────────────────────────────────────────────────────

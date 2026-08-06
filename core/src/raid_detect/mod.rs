@@ -12,7 +12,10 @@ mod matching_tests;
 mod normalize_tests;
 
 pub use candidates::{CandidateSet, PlayerCandidate};
-pub use matching::{MatchConfig, RowAssignment, RowObservation, assign_rows};
+pub use matching::{
+    CandidateScore, Contribution, MatchConfig, RowAssignment, RowDecision, RowObservation,
+    assign_rows, assign_rows_explained,
+};
 pub use normalize::{edit_distance, normalize, similarity};
 
 /// OCR readings shorter than this are too easy to get from background noise.

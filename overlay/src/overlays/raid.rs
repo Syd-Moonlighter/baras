@@ -1416,10 +1416,13 @@ impl RaidOverlay {
         // Note: draw_text y is baseline
         let text_y = y + h - 4.0;
 
+        // Orange until a name is tied to a log player, green once it is.
         let text_color = if raid_frame.is_empty() {
             colors::raid_slot_number()
+        } else if raid_frame.player_id.is_some() {
+            colors::raid_name_confirmed()
         } else {
-            colors::white()
+            colors::raid_name_provisional()
         };
         self.frame
             .draw_text_glowed(&text, text_x, text_y, font_size, text_color);

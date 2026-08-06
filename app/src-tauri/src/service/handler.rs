@@ -24,6 +24,15 @@ use crate::state::SharedState;
 
 const MAX_OCR_ROSTER_AGE_MINUTES: i64 = 12 * 60;
 
+/// How far back in log time a player may have been seen and still be offered to
+/// the matcher.
+///
+/// Everyone seen since the area was entered is too loose — a raid night in one
+/// instance keeps players who left hours ago, and each one is a chance for a row
+/// to match the wrong name. Measured against the newest log event rather than
+/// the wall clock, so it behaves the same when the log lags.
+const OCR_ROSTER_WINDOW_MINUTES: i64 = 10;
+
 fn roster_is_recent(last_event: Option<chrono::NaiveDateTime>, now: chrono::NaiveDateTime) -> bool {
     let Some(last_event) = last_event else {
         return false;
@@ -454,6 +463,9 @@ impl ServiceHandle {
         if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
             return Vec::new();
         }
+        let Some(last_event) = last_event else {
+            return Vec::new();
+        };
 
         let session_guard = self.shared.session.read().await;
         let Some(session) = session_guard.as_ref() else {
@@ -493,6 +505,7 @@ impl ServiceHandle {
             }
         }
 
+        set.expire_before(last_event - chrono::Duration::minutes(OCR_ROSTER_WINDOW_MINUTES));
         set.candidates()
     }
 

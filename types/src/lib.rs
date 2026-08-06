@@ -2062,6 +2062,10 @@ pub struct RaidOverlaySettings {
     pub show_effect_icons: bool,
     #[serde(default = "default_frame_spacing")]
     pub frame_spacing: f32,
+    /// Write the crops handed to OCR, and what came back, to disk on every
+    /// detection. Diagnostic only.
+    #[serde(default)]
+    pub ocr_debug_dump: bool,
 }
 
 fn default_grid_columns() -> u8 {
@@ -2103,6 +2107,7 @@ impl Default for RaidOverlaySettings {
             effect_fill_opacity: 255,
             show_effect_icons: false,
             frame_spacing: 4.0,
+            ocr_debug_dump: false,
         }
     }
 }
