@@ -10,11 +10,23 @@ pub mod engine;
 
 pub use debug_dump::DebugDump;
 
-use analysis::{BandKind, detect_bands, harmonize, parse_health_text, prepare};
+use std::sync::OnceLock;
+
+use rayon::prelude::*;
+
+use analysis::{
+    Band, BandKind, PreparedCrop, detect_bands, harmonize, parse_health_text, prepare,
+};
 use baras_core::raid_detect::{
     MIN_OCR_NAME_CHARS, MatchConfig, PlayerCandidate, RowAssignment, RowObservation,
 };
 use baras_overlay::capture::CapturedImage;
+
+/// Crops kept in flight during recognition.
+///
+/// This is the queue depth, not the number of threads, but the amount of crops
+/// 'in-flight' at the same time.
+const RECOGNITION_JOBS: usize = 8;
 
 /// A slot rectangle within the captured overlay image.
 pub type SlotRect = (u8, i32, i32, u32, u32);
@@ -96,13 +108,29 @@ pub fn observe_slots_dumping(
 
     harmonize(&mut per_slot_bands);
 
-    let mut observations = Vec::new();
-
-    for ((slot_rect, slot_image), slot_bands) in slots.iter().zip(&slot_images).zip(&per_slot_bands)
+    // Prepare everything first: crops can only overlap once they all exist.
+    // Bands outside their slot stay `None` so readings keep lining up.
+    let mut crops: Vec<(usize, Band, Option<PreparedCrop>)> = Vec::new();
+    for (slot_index, (slot_image, slot_bands)) in
+        slot_images.iter().zip(&per_slot_bands).enumerate()
     {
         let Some(slot_image) = slot_image else {
             continue;
         };
+        for band in slot_bands {
+            crops.push((slot_index, *band, prepare(slot_image, band)));
+        }
+    }
+
+    let readings = recognize_all(&crops);
+
+    let mut observations = Vec::new();
+    let mut next = 0;
+
+    for ((slot_index, slot_rect), slot_bands) in slots.iter().enumerate().zip(&per_slot_bands) {
+        if slot_images[slot_index].is_none() {
+            continue;
+        }
 
         if let Some(dump) = dump.as_deref_mut() {
             dump.slot(
@@ -120,25 +148,28 @@ pub fn observe_slots_dumping(
         };
         let mut saw_anything = false;
 
-        for band in slot_bands {
-            let Some(crop) = prepare(slot_image, band) else {
+        while let Some((_, band, crop)) = crops.get(next).filter(|entry| entry.0 == slot_index) {
+            let reading = readings[next].as_ref();
+            next += 1;
+
+            let (Some(crop), Some(reading)) = (crop.as_ref(), reading) else {
                 if let Some(dump) = dump.as_deref_mut() {
                     dump.band_skipped(band, "band lies outside the slot");
                 }
                 continue;
             };
-            let text = match engine::recognize(&crop) {
+            let text = match reading {
                 Ok(text) if !text.trim().is_empty() => text,
                 Ok(_) => {
                     if let Some(dump) = dump.as_deref_mut() {
-                        dump.band(slot_rect.0, band, &crop, "", "empty reading");
+                        dump.band(slot_rect.0, band, crop, "", "empty reading");
                     }
                     continue;
                 }
                 Err(e) => {
                     tracing::debug!("Slot {} band {:?} unreadable: {e}", slot_rect.0, band.kind);
                     if let Some(dump) = dump.as_deref_mut() {
-                        dump.band(slot_rect.0, band, &crop, "", &format!("unreadable: {e}"));
+                        dump.band(slot_rect.0, band, crop, "", &format!("unreadable: {e}"));
                     }
                     continue;
                 }
@@ -147,14 +178,14 @@ pub fn observe_slots_dumping(
             match band.kind {
                 BandKind::Name => {
                     if let Some(dump) = dump.as_deref_mut() {
-                        let outcome = format!("display={:?}", clean_for_display(&text));
-                        dump.band(slot_rect.0, band, &crop, &text, &outcome);
+                        let outcome = format!("display={:?}", clean_for_display(text));
+                        dump.band(slot_rect.0, band, crop, text, &outcome);
                     }
-                    observation.name_text = Some(text);
+                    observation.name_text = Some(text.clone());
                     saw_anything = true;
                 }
                 BandKind::Health => {
-                    let (value, percent) = parse_health_text(&text);
+                    let (value, percent) = parse_health_text(text);
                     if let Some(dump) = dump.as_deref_mut() {
                         let outcome = match (value, percent) {
                             (None, None) => "parsed nothing".to_string(),
@@ -164,7 +195,7 @@ pub fn observe_slots_dumping(
                                 p.map_or("-".into(), |p| p.to_string())
                             ),
                         };
-                        dump.band(slot_rect.0, band, &crop, &text, &outcome);
+                        dump.band(slot_rect.0, band, crop, text, &outcome);
                     }
                     observation.hp_value = value;
                     observation.hp_percent = percent;
@@ -179,6 +210,36 @@ pub fn observe_slots_dumping(
     }
 
     observations
+}
+
+/// `None` when the pool cannot be built.
+/// Fallback:read one at a time rather than fail.
+fn recognition_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(RECOGNITION_JOBS)
+            .thread_name(|index| format!("baras-ocr-{index}"))
+            .build()
+            .inspect_err(|e| tracing::warn!("Reading crops one at a time: {e}"))
+            .ok()
+    })
+    .as_ref()
+}
+
+/// Reads every crop. Lines up with `crops`, `None` where there was nothing to read.
+fn recognize_all(
+    crops: &[(usize, Band, Option<PreparedCrop>)],
+) -> Vec<Option<Result<String, engine::OcrError>>> {
+    fn read(entry: &(usize, Band, Option<PreparedCrop>)) -> Option<Result<String, engine::OcrError>> {
+        entry.2.as_ref().map(engine::recognize)
+    }
+
+    // Load the model before spreading out, never inside a worker: see `warm`.
+    match (engine::warm(), recognition_pool()) {
+        (Ok(()), Some(pool)) => pool.install(|| crops.par_iter().map(read).collect()),
+        _ => crops.iter().map(read).collect(),
+    }
 }
 
 /// Full detection pass: read the screen, then match against known players.

@@ -26,3 +26,6 @@ tracing = { workspace = true }
 # Debug dumps of the crops handed to recognition.
 png = "0.17"
 chrono = "0.4.42"
+
+# Make sure we can have multiple crops 'in flight'
+rayon = "1"

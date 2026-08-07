@@ -203,6 +203,14 @@ fn engine() -> Result<Arc<OcrEngine>, OcrError> {
     Ok(built)
 }
 
+/// Load the engine now, on this thread.
+///
+/// This holds the engine lock.
+/// RTen loads on its own thread pool.
+pub fn warm() -> Result<(), OcrError> {
+    engine().map(|_| ())
+}
+
 /// Recognize the text in one prepared crop.
 ///
 /// The crop is treated as a single text line covering the whole image, since

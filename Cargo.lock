@@ -822,6 +822,7 @@ dependencies = [
  "dirs",
  "ocrs",
  "png 0.17.16",
+ "rayon",
  "reqwest 0.12.28",
  "rten",
  "rten-imageproc",
