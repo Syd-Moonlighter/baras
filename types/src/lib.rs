@@ -2866,6 +2866,8 @@ pub struct HotkeySettings {
     pub toggle_operation_timer: Option<String>,
     #[serde(default)]
     pub toggle_live_mode: Option<String>,
+    #[serde(default)]
+    pub detect_raid_names: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

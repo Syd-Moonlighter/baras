@@ -110,7 +110,15 @@ async fn try_portal_shortcuts(
                 .preferred_trigger(converted_keys.last().unwrap().as_str())
         );
     }
-    
+    if let Some(ref key) = hotkeys.detect_raid_names {
+        let converted = convert_key_format(key);
+        converted_keys.push(converted);
+        shortcuts.push(
+            NewShortcut::new("detect-raid-names", "Detect raid frame names")
+                .preferred_trigger(converted_keys.last().unwrap().as_str())
+        );
+    }
+
     if shortcuts.is_empty() {
         info!("No hotkeys configured, skipping portal registration");
         return Ok(());
@@ -167,6 +175,11 @@ async fn try_portal_shortcuts(
                         "toggle-live-mode" => {
                             tauri::async_runtime::spawn(async move {
                                 toggle_live_mode_hotkey(handle).await;
+                            });
+                        }
+                        "detect-raid-names" => {
+                            tauri::async_runtime::spawn(async move {
+                                detect_raid_names_hotkey(state).await;
                             });
                         }
                         _ => {
@@ -356,6 +369,29 @@ pub fn spawn_register_hotkeys(
                 warn!(hotkey = %key_str, "Invalid go live hotkey format");
             }
         }
+
+        if let Some(ref key_str) = hotkeys.detect_raid_names {
+            if let Ok(shortcut) = key_str.parse::<Shortcut>() {
+                let state = overlay_state.clone();
+
+                if let Err(e) =
+                    global_shortcut.on_shortcut(shortcut, move |_app, _shortcut, event| {
+                        if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                            let state = state.clone();
+                            tauri::async_runtime::spawn(async move {
+                                detect_raid_names_hotkey(state).await;
+                            });
+                        }
+                    })
+                {
+                    error!(error = %e, hotkey = %key_str, "Failed to register raid name detection hotkey");
+                } else {
+                    info!(hotkey = %key_str, "Registered raid name detection hotkey");
+                }
+            } else {
+                warn!(hotkey = %key_str, "Invalid raid name detection hotkey format");
+            }
+        }
     });
 }
 
@@ -448,6 +484,25 @@ async fn toggle_live_mode_hotkey(service: ServiceHandle) {
         if let Err(e) = service.resume_live_tailing().await {
             error!(error = %e, "Failed to resume live tailing via hotkey");
         }
+    }
+}
+
+async fn detect_raid_names_hotkey(overlay_state: SharedOverlayState) {
+    let raid_tx = {
+        let state = match overlay_state.lock() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        if !state.is_running(OverlayType::Raid) {
+            return;
+        }
+
+        state.get_raid_tx().cloned()
+    };
+
+    if let Some(tx) = raid_tx {
+        let _ = tx.send(OverlayCommand::DetectRaidNames).await;
     }
 }
 

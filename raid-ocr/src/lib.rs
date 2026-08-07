@@ -4,6 +4,7 @@
 //! pipeline as live captures. Unreadable rows stay unassigned.
 
 pub mod analysis;
+pub mod cpu;
 pub mod debug_dump;
 pub mod engine;
 

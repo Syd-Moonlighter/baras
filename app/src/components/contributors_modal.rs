@@ -51,6 +51,20 @@ const CONTRIBUTORS: &[Contributor] = &[
     },
 ];
 
+struct BundledModel {
+    name: &'static str,
+    role: &'static str,
+    license: &'static str,
+    url: &'static str,
+}
+
+const MODELS: &[BundledModel] = &[BundledModel {
+    name: "ocrs text recognition",
+    role: "Raid frame name detection",
+    license: "CC BY-SA 4.0",
+    url: "https://huggingface.co/robertknight/ocrs",
+}];
+
 #[component]
 pub fn ContributorsModal(open: Signal<bool>) -> Element {
     let mut open = open;
@@ -100,6 +114,25 @@ pub fn ContributorsModal(open: Signal<bool>) -> Element {
                                     span { class: "contributor-name", "{c.name}" }
                                 }
                                 span { class: "contributor-role", "{c.role}" }
+                            }
+                        }
+                    }
+                    h4 { class: "contributors-section", "Third-party model" }
+                    ul { class: "contributors-list",
+                        for m in MODELS.iter() {
+                            li { key: "{m.name}",
+                                a {
+                                    class: "contributor-name",
+                                    href: "#",
+                                    onclick: move |e| {
+                                        e.prevent_default();
+                                        spawn(async move {
+                                            api::open_url(m.url).await;
+                                        });
+                                    },
+                                    "{m.name}"
+                                }
+                                span { class: "contributor-role", "{m.role} · {m.license}" }
                             }
                         }
                     }

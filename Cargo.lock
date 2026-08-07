@@ -825,6 +825,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rten",
  "rten-imageproc",
+ "sha2",
  "tracing",
 ]
 

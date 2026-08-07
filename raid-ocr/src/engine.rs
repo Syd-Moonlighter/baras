@@ -10,12 +10,18 @@ use std::time::Duration;
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
 use rten_imageproc::{Rect, RotatedRect};
+use sha2::{Digest, Sha256};
 
 use crate::analysis::PreparedCrop;
 
-/// Upstream distribution point for the ocrs recognition model (~10 MB).
-const RECOGNITION_MODEL_URL: &str =
-    "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten";
+const RECOGNITION_MODEL_URLS: &[&str] = &[
+    "https://raw.githubusercontent.com/baras-app/baras/master/raid-ocr/model/text-recognition.rten",
+    "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+];
+
+const RECOGNITION_MODEL_SHA256: &str =
+    "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e";
+
 const MIN_MODEL_BYTES: u64 = 1_000_000;
 
 #[derive(Debug)]
@@ -73,22 +79,28 @@ pub async fn ensure_model() -> Result<PathBuf, OcrError> {
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| OcrError::ModelUnavailable(format!("cannot build download client: {e}")))?;
-    let response = client
-        .get(RECOGNITION_MODEL_URL)
-        .send()
-        .await
-        .and_then(reqwest::Response::error_for_status)
-        .map_err(|e| OcrError::ModelUnavailable(format!("download failed: {e}")))?;
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| OcrError::ModelUnavailable(format!("download failed: {e}")))?;
-    if bytes.len() < MIN_MODEL_BYTES as usize {
-        return Err(OcrError::ModelUnavailable(format!(
-            "download was only {} bytes",
-            bytes.len()
-        )));
+
+    let mut bytes = None;
+    let mut failures = Vec::new();
+    for url in RECOGNITION_MODEL_URLS {
+        match fetch_model(&client, url).await {
+            Ok(fetched) => {
+                bytes = Some(fetched);
+                break;
+            }
+            Err(e) => {
+                // Log failed mirrors even when a fallback works.
+                tracing::warn!("OCR model not available from {url}: {e}");
+                failures.push(format!("{url}: {e}"));
+            }
+        }
     }
+    let Some(bytes) = bytes else {
+        return Err(OcrError::ModelUnavailable(format!(
+            "every source failed ({})",
+            failures.join("; ")
+        )));
+    };
 
     // Write beside the target and rename, so an interrupted download cannot
     // leave a truncated file that later loads as a corrupt model. The temp name
@@ -109,6 +121,39 @@ pub async fn ensure_model() -> Result<PathBuf, OcrError> {
     }
 
     Ok(path)
+}
+
+async fn fetch_model(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    let bytes = client
+        .get(url)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| format!("download failed: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
+
+    if bytes.len() < MIN_MODEL_BYTES as usize {
+        return Err(format!("download was only {} bytes", bytes.len()));
+    }
+
+    let digest = hex(&Sha256::digest(&bytes));
+    if digest != RECOGNITION_MODEL_SHA256 {
+        return Err(format!("served a different model (sha256 {digest})"));
+    }
+
+    Ok(bytes.to_vec())
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut out, b| {
+            use std::fmt::Write;
+            let _ = write!(out, "{b:02x}");
+            out
+        })
 }
 
 /// Process-wide engine, built once on first use.

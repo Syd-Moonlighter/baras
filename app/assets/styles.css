@@ -3643,6 +3643,13 @@ a.contributor-name:hover {
   text-align: right;
 }
 
+.contributors-section {
+  margin: 1.5em 0 0.5em 0;
+  padding-top: 1em;
+  border-top: 1px solid var(--blue-alpha-15);
+  color: var(--text-primary);
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    History Panel Styles
    ───────────────────────────────────────────────────────────────────────────── */

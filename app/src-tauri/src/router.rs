@@ -258,6 +258,16 @@ async fn detect_raid_names(
         .overlay_settings
         .raid_overlay
         .ocr_debug_dump;
+
+    // Log first so stalled runs still include the hardware details.
+    tracing::info!(
+        target: "baras::raid_detect",
+        cpu = baras_raid_ocr::cpu::summary(),
+        slots = slot_count,
+        candidates = candidate_count,
+        "starting raid name detection"
+    );
+
     let result = tokio::task::spawn_blocking(move || {
         let mut dump = dump_enabled
             .then(|| baras_raid_ocr::DebugDump::new(slot_count))
