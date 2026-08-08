@@ -490,9 +490,14 @@ const BASE_GAP: f32 = 4.0;
 const BASE_PADDING: f32 = 8.0;
 const DETECT_BUTTON_EDGE_OVERLAP: f32 = 2.0;
 const DETECT_BUTTON_HIT_PADDING: f32 = 5.0;
-// Give the transparent clear a frame to reach the compositor.
+/// Make sure the overlay is fully blanked.
+/// 60ms should be save, accounting for compositor and frame delay.
+/// We can optimize this and actually ask the compositor, but, a lot of extra work...
 const BLANK_SETTLE_MS: u64 = 60;
-const DETECTION_MESSAGE_SECS: u64 = 6;
+/// How long the information messages stay on screen
+/// I think 8 is sweetspot.
+/// Update if needed.
+const DETECTION_MESSAGE_SECS: u64 = 8;
 
 struct RaidSlotGeometry {
     padding: f32,
@@ -826,7 +831,7 @@ impl RaidOverlay {
             Ok(image) => Some(image),
             Err(e) => {
                 tracing::warn!("Raid frame capture failed: {e}");
-                self.set_detection_message("Capture failed; assign manually".into());
+                self.set_detection_message("Screen capture failed: assign names manually".into());
                 None
             }
         }
@@ -1562,7 +1567,7 @@ impl Overlay for RaidOverlay {
                 Ok(message) => Some(message),
                 Err(std::sync::mpsc::TryRecvError::Empty) => None,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some("Detection stopped; assign manually".into())
+                    Some("Detection stopped: assign names manually".into())
                 }
             });
         if let Some(message) = detection_result {

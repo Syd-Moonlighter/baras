@@ -199,38 +199,30 @@ fn raid_row_lines(
         .collect()
 }
 
-/// Progress is reported against rows, not against the roster.
-///
-/// The roster is every player the log has seen recently, which can legitimately
-/// hold more people than there are frames — a swap mid-session leaves both. A
-/// perfect read of eight frames used to print `matched 8/9` and read as a
-/// failure, so the roster size is now context rather than a denominator.
+/// Tell the user what happend during the raid name detection.
+/// Tell how many names were read and how many of those were confirmed against the log.
+/// List the amount of names available (log roster) only as extra information.
 fn raid_detection_message(
     slot_count: usize,
     names_read: usize,
-    matched: usize,
+    confirmed: usize,
+    unconfirmed: usize,
     candidate_count: usize,
-    provisional: usize,
-    registered: usize,
 ) -> String {
-    let prefix = format!("OCR {names_read}/{slot_count}");
-    let retained = registered.saturating_sub(matched);
-    let registry_state = match (retained, provisional) {
-        (0, 0) => "assignments unchanged".to_string(),
-        (retained, 0) => format!("{retained} retained"),
-        (0, provisional) => format!("{provisional} provisional"),
-        (retained, provisional) => format!("{retained} retained, {provisional} provisional"),
+    let state = match (confirmed, unconfirmed) {
+        (0, 0) => "no names assigned".to_string(),
+        (confirmed, 0) => format!("{confirmed} confirmed"),
+        (0, unconfirmed) => format!("{unconfirmed} unconfirmed"),
+        (confirmed, unconfirmed) => format!("{confirmed} confirmed, {unconfirmed} unconfirmed"),
     };
 
-    if candidate_count == 0 {
-        return format!("{prefix}; no roster; {registry_state}");
-    }
-
-    if matched == names_read && provisional == 0 {
-        format!("{prefix}; matched all {matched} (roster {candidate_count})")
+    let roster = if candidate_count == 0 {
+        "no log roster yet".to_string()
     } else {
-        format!("{prefix}; matched {matched}/{names_read} rows (roster {candidate_count}); {registry_state}")
-    }
+        format!("log roster {candidate_count}")
+    };
+
+    format!("OCR read {names_read}/{slot_count}: {state} ({roster})")
 }
 
 async fn detect_raid_names(
@@ -244,7 +236,7 @@ async fn detect_raid_names(
 
     if let Err(e) = baras_raid_ocr::engine::ensure_model().await {
         tracing::warn!("Raid name detection unavailable: {e}");
-        let _ = result_tx.send("OCR unavailable; assign manually".into());
+        let _ = result_tx.send("OCR unavailable: assign names manually".into());
         return;
     }
 
@@ -308,7 +300,7 @@ async fn detect_raid_names(
         Ok(result) => result,
         Err(e) => {
             tracing::warn!("Raid name detection panicked: {e}");
-            let _ = result_tx.send("Detection failed; assign manually".into());
+            let _ = result_tx.send("Detection failed: assign names manually".into());
             return;
         }
     };
@@ -332,7 +324,7 @@ async fn detect_raid_names(
             candidate_count,
             "Raid name detection could not read any names"
         );
-        let _ = result_tx.send("No names read; check the raid-frame alignment".into());
+        let _ = result_tx.send("No names read: check the raid frame alignment".into());
         return;
     }
 
@@ -357,10 +349,9 @@ async fn detect_raid_names(
     let _ = result_tx.send(raid_detection_message(
         slot_count,
         names_read,
-        matched,
-        candidate_count,
-        provisional,
         registered,
+        provisional,
+        candidate_count,
     ));
 }
 
@@ -945,37 +936,39 @@ async fn process_overlay_update(
 mod raid_detection_message_tests {
     use super::raid_detection_message;
 
+    /// Arguments are (slots, names read, confirmed, unconfirmed, roster).
     #[test]
-    fn reports_ocr_and_registry_results_separately() {
+    fn reports_the_grid_as_it_now_stands() {
         assert_eq!(
-            raid_detection_message(8, 8, 0, 0, 1, 7),
-            "OCR 8/8; no roster; 7 retained, 1 provisional"
+            raid_detection_message(8, 8, 7, 1, 8),
+            "OCR read 8/8: 7 confirmed, 1 unconfirmed (log roster 8)"
         );
         assert_eq!(
-            raid_detection_message(8, 8, 0, 0, 0, 8),
-            "OCR 8/8; no roster; 8 retained"
+            raid_detection_message(8, 8, 8, 0, 8),
+            "OCR read 8/8: 8 confirmed (log roster 8)"
         );
         assert_eq!(
-            raid_detection_message(8, 6, 6, 8, 0, 8),
-            "OCR 6/8; matched all 6 (roster 8)"
+            raid_detection_message(8, 6, 6, 0, 8),
+            "OCR read 6/8: 6 confirmed (log roster 8)"
         );
+    }
+
+    /// Before anyone appears in the log there is nothing to confirm against
+    #[test]
+    fn an_empty_roster_is_explained_rather_than_counted() {
         assert_eq!(
-            raid_detection_message(8, 8, 8, 8, 0, 8),
-            "OCR 8/8; matched all 8 (roster 8)"
-        );
-        assert_eq!(
-            raid_detection_message(8, 8, 6, 8, 1, 7),
-            "OCR 8/8; matched 6/8 rows (roster 8); 1 retained, 1 provisional"
+            raid_detection_message(8, 8, 0, 8, 0),
+            "OCR read 8/8: 8 unconfirmed (no log roster yet)"
         );
     }
 
     /// The case that used to read `matched 8/9` and look like a failure: every
-    /// frame matched, but the log had seen a ninth player.
+    /// frame resolved, but the log had seen a ninth player.
     #[test]
     fn a_roster_larger_than_the_frame_count_is_not_a_failure() {
         assert_eq!(
-            raid_detection_message(8, 8, 8, 9, 0, 8),
-            "OCR 8/8; matched all 8 (roster 9)"
+            raid_detection_message(8, 8, 8, 0, 9),
+            "OCR read 8/8: 8 confirmed (log roster 9)"
         );
     }
 }
