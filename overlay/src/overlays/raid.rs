@@ -1021,15 +1021,105 @@ impl RaidOverlay {
         );
     }
 
+    fn fits(&mut self, text: &str, font_size: f32, max_width: f32) -> bool {
+        self.frame.measure_text(text, font_size).0 <= max_width
+    }
+
+
+
+    /// Break a message into lines that fit `max_width`.
+    ///
+    /// Breaks at commas if possible, otherwise spaces.
+    fn wrap_lines(&mut self, text: &str, font_size: f32, max_width: f32) -> Vec<String> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Vec::new();
+        }
+        if self.fits(text, font_size, max_width) {
+            return vec![text.to_string()];
+        }
+
+        let mut lines = Vec::new();
+        let mut current = String::new();
+
+        for clause in comma_clauses(text) {
+            let candidate = if current.is_empty() {
+                clause.clone()
+            } else {
+                format!("{current} {clause}")
+            };
+            if current.is_empty() || self.fits(&candidate, font_size, max_width) {
+                current = candidate;
+            } else {
+                lines.push(std::mem::replace(&mut current, clause));
+            }
+        }
+        if !current.is_empty() {
+            lines.push(current);
+        }
+
+        // A clause that still overflows gets broken on spaces instead.
+        let mut wrapped = Vec::with_capacity(lines.len());
+        for line in lines {
+            if self.fits(&line, font_size, max_width) {
+                wrapped.push(line);
+            } else {
+                wrapped.extend(self.wrap_words(&line, font_size, max_width));
+            }
+        }
+        wrapped
+    }
+
+    /// Break on spaces. 
+    // A too-long word will overflow.
+    fn wrap_words(&mut self, text: &str, font_size: f32, max_width: f32) -> Vec<String> {
+        let mut lines = Vec::new();
+        let mut current = String::new();
+
+        for word in text.split_whitespace() {
+            let candidate = if current.is_empty() {
+                word.to_string()
+            } else {
+                format!("{current} {word}")
+            };
+            if current.is_empty() || self.fits(&candidate, font_size, max_width) {
+                current = candidate;
+            } else {
+                lines.push(std::mem::replace(&mut current, word.to_string()));
+            }
+        }
+
+        if !current.is_empty() {
+            lines.push(current);
+        }
+        lines
+    }
+
     fn render_detection_message(&mut self) {
         let Some((message, _)) = &self.detection_message else {
             return;
         };
-        let message = truncate_name(message, 52);
+        // Wrapping needs the frame mutably, so the message cannot stay borrowed.
+        let message = message.clone();
         let font_size = self.frame.scaled(9.0).clamp(8.0, 12.0);
-        let (text_width, text_height) = self.frame.measure_text(&message, font_size);
-        let width = (text_width + 12.0).min(self.frame.width() as f32 - 6.0);
-        let height = text_height + 8.0;
+
+        // Panel is inset 3px from the overlay edge and pads its text by 6px.
+        let panel_max = self.frame.width() as f32 - 6.0;
+        let lines = self.wrap_lines(&message, font_size, panel_max - 12.0);
+        if lines.is_empty() {
+            return;
+        }
+
+        let mut text_width: f32 = 0.0;
+        let mut line_height: f32 = font_size;
+        for line in &lines {
+            let (w, h) = self.frame.measure_text(line, font_size);
+            text_width = text_width.max(w);
+            line_height = line_height.max(h);
+        }
+
+        let width = (text_width + 12.0).min(panel_max);
+        let height = line_height * lines.len() as f32 + 8.0;
         let (_, button_y, _, button_height) = self.detect_button_bounds();
         let x = self.frame.width() as f32 - width - 3.0;
         let y = button_y + button_height + 3.0;
@@ -1042,15 +1132,17 @@ impl RaidOverlay {
             4.0,
             Color::from_rgba8(20, 24, 32, 225),
         );
-        self.frame.draw_text_styled(
-            &message,
-            x + 6.0,
-            y + 4.0 + font_size,
-            font_size,
-            Color::from_rgba8(240, 244, 250, 255),
-            false,
-            false,
-        );
+        for (i, line) in lines.iter().enumerate() {
+            self.frame.draw_text_styled(
+                line,
+                x + 6.0,
+                y + 4.0 + font_size + i as f32 * line_height,
+                font_size,
+                Color::from_rgba8(240, 244, 250, 255),
+                false,
+                false,
+            );
+        }
     }
 
     /// Render a single player frame
@@ -1433,16 +1525,21 @@ impl RaidOverlay {
             .draw_text_glowed(&text, text_x, text_y, font_size, text_color);
 
         //  Add an indicator that is different from colour, as that might not
-        /// be as intuitive.
-        if !raid_frame.is_empty() && raid_frame.player_id.is_none() {
+        // be as intuitive.
+        if !raid_frame.is_empty() {
+            let (label, label_color) = if raid_frame.player_id.is_some() {
+                ("CONF", colors::raid_name_confirmed())
+            } else {
+                ("UNCONF", colors::raid_name_provisional())
+            };
             let label_size = font_size * 0.8;
-            let (label_w, _) = self.frame.measure_text("prov:", label_size);
+            let (label_w, _) = self.frame.measure_text(label, label_size);
             self.frame.draw_text_glowed(
-                "prov",
+                label,
                 x + w - label_w - 4.0,
                 text_y - font_size,
                 label_size,
-                colors::raid_name_provisional(),
+                label_color,
             );
         }
 
@@ -1644,9 +1741,32 @@ impl Overlay for RaidOverlay {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Split a message after each comma, keeping the comma.
+///
+/// Whitespace is dropped.
+fn comma_clauses(text: &str) -> Vec<String> {
+    let mut clauses = Vec::new();
+    let mut start = 0;
+
+    for (index, c) in text.char_indices() {
+        if c == ',' {
+            let end = index + c.len_utf8();
+            let clause = text[start..end].trim();
+            if !clause.is_empty() {
+                clauses.push(clause.to_string());
+            }
+            start = end;
+        }
+    }
+
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        clauses.push(tail.to_string());
+    }
+    clauses
+}
+
+
 
     #[test]
     fn provisional_name_is_not_an_empty_frame() {

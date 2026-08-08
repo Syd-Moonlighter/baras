@@ -149,17 +149,8 @@ pub struct CandidateScore {
     pub hp_percent: Option<Contribution>,
 }
 
-/// Combined score for one row against one candidate, in `0.0..=1.0`.
-fn combined_score(
-    observation: &RowObservation,
-    normalized_name: Option<&str>,
-    candidate: &PlayerCandidate,
-    config: &MatchConfig,
-) -> f32 {
-    score_parts(observation, normalized_name, candidate, config).total
-}
-
-/// [`combined_score`], keeping the pieces so they can be logged.
+/// Combined score for one row against one candidate, in `0.0..=1.0`,
+/// keeping the pieces so they can be logged.
 fn score_parts(
     observation: &RowObservation,
     normalized_name: Option<&str>,
