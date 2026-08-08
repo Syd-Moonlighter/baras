@@ -2517,6 +2517,7 @@ impl CombatService {
 
             // Throttle stale-recovery checks to once per second
             let mut last_stale_check = tokio::time::Instant::now();
+            let mut last_promotion_check = tokio::time::Instant::now();
 
             loop {
                 // Check which overlays are active to determine sleep interval
@@ -2567,8 +2568,14 @@ impl CombatService {
                     continue;
                 }
 
-                // Raid frames: send whenever there are effects (or always in rearrange mode)
+                // Update whenever there are effects (or always in rearrange mode)
                 if raid_active {
+                    // This is a roster lookup, running once every second is fine
+                    if last_promotion_check.elapsed() >= std::time::Duration::from_secs(1) {
+                        last_promotion_check = tokio::time::Instant::now();
+                        promote_provisional_slots(&shared).await;
+                    }
+
                     let rearranging = shared.rearrange_mode.load(Ordering::Relaxed);
                     if let Some(data) = build_raid_frame_data(&shared, rearranging, icon_cache.as_ref()).await {
                         let effect_count: usize = data.frames.iter().map(|f| f.effects.len()).sum();
@@ -3198,6 +3205,65 @@ async fn calculate_combat_data(shared: &Arc<SharedState>) -> Option<CombatData> 
         })
     } else {
         None
+    }
+}
+
+/// Give OCR names their log identity as soon as the roster knows them.
+///
+/// Registration will otherwise wait until combat, not when probing someone.
+async fn promote_provisional_slots(shared: &Arc<SharedState>) {
+    let provisional = {
+        let registry = shared
+            .raid_registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        registry.provisional_entries()
+    };
+    if provisional.is_empty() {
+        return;
+    }
+
+    let candidates = crate::service::handler::raid_detection_candidates(shared).await;
+    if candidates.is_empty() {
+        return;
+    }
+
+    // Name only, as health total and percentage are not reliable at this stage.
+    let observations: Vec<baras_core::raid_detect::RowObservation> = provisional
+        .into_iter()
+        .map(|(slot, name)| baras_core::raid_detect::RowObservation {
+            row: slot as usize,
+            name_text: Some(name),
+            ..Default::default()
+        })
+        .collect();
+
+    let assignments = baras_core::raid_detect::assign_rows(
+        &observations,
+        &candidates,
+        &baras_core::raid_detect::MatchConfig::default(),
+    );
+    if assignments.is_empty() {
+        return;
+    }
+
+    for assignment in &assignments {
+        debug!(
+            "Promoted slot {} to {} at {:.2}",
+            assignment.row, assignment.name, assignment.confidence
+        );
+    }
+
+    {
+        let mut registry = shared
+            .raid_registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        registry.assign_slots(assignments.into_iter().filter_map(|a| {
+            u8::try_from(a.row)
+                .ok()
+                .map(|row| (row, a.entity_id, a.name))
+        }));
     }
 }
 

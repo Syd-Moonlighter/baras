@@ -33,6 +33,72 @@ const MAX_OCR_ROSTER_AGE_MINUTES: i64 = 12 * 60;
 /// the wall clock, so it behaves the same when the log lags.
 const OCR_ROSTER_WINDOW_MINUTES: i64 = 10;
 
+/// Current-area roster for OCR. Names identify and health only supports.
+///
+/// A free function so the overlay loop can always reach it
+pub(crate) async fn raid_detection_candidates(
+    shared: &Arc<SharedState>,
+) -> Vec<baras_core::raid_detect::PlayerCandidate> {
+    use baras_core::raid_detect::CandidateSet;
+
+    if !shared.is_live_tailing.load(Ordering::SeqCst) {
+        return Vec::new();
+    }
+    let last_event = shared
+        .directory_index
+        .read()
+        .await
+        .newest_file()
+        .and_then(|file| file.last_event_time);
+    if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
+        return Vec::new();
+    }
+    let Some(last_event) = last_event else {
+        return Vec::new();
+    };
+
+    let session_guard = shared.session.read().await;
+    let Some(session) = session_guard.as_ref() else {
+        return Vec::new();
+    };
+    let session = session.read().await;
+    let Some(cache) = session.session_cache.as_ref() else {
+        return Vec::new();
+    };
+    let mut set = CandidateSet::new();
+    let area_started = cache.current_area.entered_at;
+    for player in cache.player_disciplines.values() {
+        let Some(last_seen) = player.last_seen_at else {
+            continue;
+        };
+        if area_started.is_some_and(|started| last_seen < started) {
+            continue;
+        }
+        set.observe_raw(
+            player.id,
+            baras_core::context::resolve(player.name),
+            (player.current_hp, player.max_hp),
+            last_seen,
+        );
+    }
+    if let Some(encounter) = cache.current_encounter() {
+        for player in encounter.players.values() {
+            let Some(last_seen) = player.last_seen_at else {
+                continue;
+            };
+            set.observe_raw(
+                player.id,
+                baras_core::context::resolve(player.name),
+                (player.current_hp, player.max_hp),
+                last_seen,
+            );
+        }
+    }
+
+    set.expire_before(last_event - chrono::Duration::minutes(OCR_ROSTER_WINDOW_MINUTES));
+    set.candidates()
+}
+
 fn roster_is_recent(last_event: Option<chrono::NaiveDateTime>, now: chrono::NaiveDateTime) -> bool {
     let Some(last_event) = last_event else {
         return false;
@@ -448,65 +514,7 @@ impl ServiceHandle {
 
     /// Current-area roster for OCR. Names identify; health only supports.
     pub async fn raid_detection_candidates(&self) -> Vec<baras_core::raid_detect::PlayerCandidate> {
-        use baras_core::raid_detect::CandidateSet;
-
-        if !self.shared.is_live_tailing.load(Ordering::SeqCst) {
-            return Vec::new();
-        }
-        let last_event = self
-            .shared
-            .directory_index
-            .read()
-            .await
-            .newest_file()
-            .and_then(|file| file.last_event_time);
-        if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
-            return Vec::new();
-        }
-        let Some(last_event) = last_event else {
-            return Vec::new();
-        };
-
-        let session_guard = self.shared.session.read().await;
-        let Some(session) = session_guard.as_ref() else {
-            return Vec::new();
-        };
-        let session = session.read().await;
-        let Some(cache) = session.session_cache.as_ref() else {
-            return Vec::new();
-        };
-        let mut set = CandidateSet::new();
-        let area_started = cache.current_area.entered_at;
-        for player in cache.player_disciplines.values() {
-            let Some(last_seen) = player.last_seen_at else {
-                continue;
-            };
-            if area_started.is_some_and(|started| last_seen < started) {
-                continue;
-            }
-            set.observe_raw(
-                player.id,
-                baras_core::context::resolve(player.name),
-                (player.current_hp, player.max_hp),
-                last_seen,
-            );
-        }
-        if let Some(encounter) = cache.current_encounter() {
-            for player in encounter.players.values() {
-                let Some(last_seen) = player.last_seen_at else {
-                    continue;
-                };
-                set.observe_raw(
-                    player.id,
-                    baras_core::context::resolve(player.name),
-                    (player.current_hp, player.max_hp),
-                    last_seen,
-                );
-            }
-        }
-
-        set.expire_before(last_event - chrono::Duration::minutes(OCR_ROSTER_WINDOW_MINUTES));
-        set.candidates()
+        raid_detection_candidates(&self.shared).await
     }
 
     /// Write detection results into the raid registry.

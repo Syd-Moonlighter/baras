@@ -256,6 +256,17 @@ impl RaidSlotRegistry {
         !self.provisional_slots.is_empty()
     }
 
+    /// Every OCR-only slot, for matching against the log roster.
+    pub fn provisional_entries(&self) -> Vec<(u8, String)> {
+        let mut entries: Vec<(u8, String)> = self
+            .provisional_slots
+            .iter()
+            .map(|(&slot, name)| (slot, name.clone()))
+            .collect();
+        entries.sort_by_key(|(slot, _)| *slot);
+        entries
+    }
+
     pub fn provisional_len(&self) -> usize {
         self.provisional_slots.len()
     }
