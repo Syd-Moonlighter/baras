@@ -1427,6 +1427,20 @@ impl RaidOverlay {
         self.frame
             .draw_text_glowed(&text, text_x, text_y, font_size, text_color);
 
+        //  Add an indicator that is different from colour, as that might not
+        /// be as intuitive.
+        if !raid_frame.is_empty() && raid_frame.player_id.is_none() {
+            let label_size = font_size * 0.8;
+            let (label_w, _) = self.frame.measure_text("prov:", label_size);
+            self.frame.draw_text_glowed(
+                "prov",
+                x + w - label_w - 4.0,
+                text_y - font_size,
+                label_size,
+                colors::raid_name_provisional(),
+            );
+        }
+
         // Clear button (×) for ALL occupied frames (including self)
         if !raid_frame.is_empty() {
             let btn_size = (h * 0.35).clamp(12.0, 18.0);
