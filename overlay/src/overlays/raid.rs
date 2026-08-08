@@ -1767,6 +1767,9 @@ fn comma_clauses(text: &str) -> Vec<String> {
 }
 
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn provisional_name_is_not_an_empty_frame() {
