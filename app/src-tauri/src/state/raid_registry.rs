@@ -25,6 +25,12 @@ impl RegisteredPlayer {
     }
 }
 
+/// How well an OCR reading matches a log name, ignoring anything too weak.
+fn name_match(read: &str, log_name: &str) -> Option<f32> {
+    baras_core::raid_detect::name_similarity(read, log_name)
+        .filter(|score| *score >= baras_core::raid_detect::MIN_NAME_CONFIDENCE)
+}
+
 /// Tracks persistent player-to-slot assignments for raid frames.
 ///
 /// Players are added when they receive an effect from the local player.
@@ -70,10 +76,12 @@ impl RaidSlotRegistry {
         let provisional_slot = self
             .provisional_slots
             .iter()
-            .find(|(_, provisional)| {
-                baras_core::raid_detect::normalize(provisional) == normalized
+            .filter_map(|(&slot, provisional)| {
+                let read = baras_core::raid_detect::normalize(provisional);
+                Some((slot, name_match(&read, &normalized)?))
             })
-            .map(|(&slot, _)| slot);
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(slot, _)| slot);
         let slot = provisional_slot.or_else(|| self.find_first_available_slot())?;
         self.provisional_slots.remove(&slot);
         let mut player = RegisteredPlayer::new(entity_id, name);
@@ -128,7 +136,8 @@ impl RaidSlotRegistry {
     ) {
         self.provisional_slots.clear();
         let mut seen_slots = HashSet::new();
-        let mut seen_names: HashSet<_> = self
+        let mut seen_names = HashSet::new();
+        let registered: Vec<_> = self
             .slots
             .values()
             .map(|player| baras_core::raid_detect::normalize(&player.name))
@@ -140,6 +149,9 @@ impl RaidSlotRegistry {
             if slot >= self.max_slots
                 || self.slots.contains_key(&slot)
                 || normalized.len() < baras_core::raid_detect::MIN_OCR_NAME_CHARS
+                || registered
+                    .iter()
+                    .any(|log| name_match(&normalized, log).is_some())
                 || !seen_slots.insert(slot)
                 || !seen_names.insert(normalized)
             {
@@ -426,6 +438,15 @@ mod tests {
         assert_eq!(registry.try_register(42, "ALPHA".into()), Some(2));
         assert_eq!(registry.get_provisional(2), None);
         assert_eq!(registry.get_player(2).map(|p| p.entity_id), Some(42));
+    }
+
+    #[test]
+    fn a_misread_provisional_name_still_claims_its_slot() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(2, "CATZOON Y".into())]);
+
+        assert_eq!(registry.try_register(42, "Catzoon".into()), Some(2));
+        assert_eq!(registry.provisional_len(), 0);
     }
 
     #[test]

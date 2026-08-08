@@ -361,7 +361,7 @@ async fn detect_raid_names(
     let _ = result_tx.send(raid_detection_message(
         slot_count,
         names_read,
-        registered,
+        matched,
         provisional,
         candidate_count,
     ));

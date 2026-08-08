@@ -266,6 +266,7 @@ impl EventProcessor {
         player.received_revive_immunity = false;
         player.current_target_id = 0;
         player.last_seen_at = Some(event.timestamp);
+        player.last_activity_at = Some(event.timestamp);
         if event.source_entity.health.1 > 0 {
             player.current_hp = event.source_entity.health.0;
             player.max_hp = event.source_entity.health.1;
@@ -282,6 +283,7 @@ impl EventProcessor {
             if let Some(player) = cache.player_disciplines.get_mut(&entity.log_id) {
                 player.current_hp = entity.health.0;
                 player.max_hp = entity.health.1;
+                player.last_activity_at = Some(event.timestamp);
             }
         }
     }

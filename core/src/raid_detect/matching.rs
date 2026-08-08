@@ -2,9 +2,9 @@
 //!
 //! Ambiguous rows stay empty. A missed row is cheaper than a wrong one.
 
-use super::MIN_OCR_NAME_CHARS;
 use super::candidates::PlayerCandidate;
 use super::normalize::{normalize, similarity};
+use super::{MIN_NAME_CONFIDENCE, MIN_OCR_NAME_CHARS};
 
 /// What OCR found in one raid-frame row.
 #[derive(Debug, Clone, Default)]
@@ -44,7 +44,7 @@ pub struct MatchConfig {
 impl Default for MatchConfig {
     fn default() -> Self {
         Self {
-            min_confidence: 0.62,
+            min_confidence: MIN_NAME_CONFIDENCE,
             min_margin: 0.10,
             // Percentages collide often; names and absolute health do not.
             name_weight: 1.0,
@@ -57,13 +57,12 @@ impl Default for MatchConfig {
 /// Health below this score is too weak to be useful.
 const STRONG_HEALTH: f32 = 0.75;
 
-/// Score recognized name text against a candidate.
+/// Score recognized name text against a normalized log name.
 ///
 /// SWTOR clips long names at a fixed pixel width, so a shorter reading is
 /// compared against the candidate's prefix rather than penalized for being
 /// short — `TESTCHARL` matches `TESTCHARLIELONG` on its first nine characters.
-fn name_score(observed: &str, candidate: &PlayerCandidate) -> Option<f32> {
-    let target = &candidate.normalized;
+pub fn name_similarity(observed: &str, target: &str) -> Option<f32> {
     if target.is_empty() || observed.len() < MIN_OCR_NAME_CHARS {
         return None;
     }
@@ -89,6 +88,10 @@ fn name_score(observed: &str, candidate: &PlayerCandidate) -> Option<f32> {
     } else {
         Some(similarity(observed, target))
     }
+}
+
+fn name_score(observed: &str, candidate: &PlayerCandidate) -> Option<f32> {
+    name_similarity(observed, &candidate.normalized)
 }
 
 /// Score a health reading against a candidate.

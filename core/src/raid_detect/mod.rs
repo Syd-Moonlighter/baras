@@ -14,9 +14,12 @@ mod normalize_tests;
 pub use candidates::{CandidateSet, PlayerCandidate};
 pub use matching::{
     CandidateScore, Contribution, MatchConfig, RowAssignment, RowDecision, RowObservation,
-    assign_rows, assign_rows_explained,
+    assign_rows, assign_rows_explained, name_similarity,
 };
 pub use normalize::{edit_distance, normalize, similarity};
 
 /// OCR readings shorter than this are too easy to get from background noise.
 pub const MIN_OCR_NAME_CHARS: usize = 3;
+
+/// Below this a reading is not the same name.
+pub const MIN_NAME_CONFIDENCE: f32 = 0.62;

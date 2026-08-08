@@ -44,19 +44,6 @@ pub(crate) async fn raid_detection_candidates(
     if !shared.is_live_tailing.load(Ordering::SeqCst) {
         return Vec::new();
     }
-    let last_event = shared
-        .directory_index
-        .read()
-        .await
-        .newest_file()
-        .and_then(|file| file.last_event_time);
-    if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
-        return Vec::new();
-    }
-    let Some(last_event) = last_event else {
-        return Vec::new();
-    };
-
     let session_guard = shared.session.read().await;
     let Some(session) = session_guard.as_ref() else {
         return Vec::new();
@@ -65,10 +52,23 @@ pub(crate) async fn raid_detection_candidates(
     let Some(cache) = session.session_cache.as_ref() else {
         return Vec::new();
     };
+
+    // The file we tail carries its own clock. 
+    // The directory index reads a last event only while indexing,
+    // which never happens again after tailing it.
+    let last_event = session.last_event_time;
+    if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
+        return Vec::new();
+    }
+    let Some(last_event) = last_event else {
+        return Vec::new();
+    };
+
     let mut set = CandidateSet::new();
     let area_started = cache.current_area.entered_at;
     for player in cache.player_disciplines.values() {
-        let Some(last_seen) = player.last_seen_at else {
+        // Activity, not roster membership.
+        let Some(last_seen) = player.last_activity_at.or(player.last_seen_at) else {
             continue;
         };
         if area_started.is_some_and(|started| last_seen < started) {
