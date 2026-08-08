@@ -1,7 +1,19 @@
-//! Locate name and health bands inside a raid-frame slot.
+//! Locate the health bar in a raid-frame slot, and the name band above it.
 //!
-//! Names are light-on-dark; health text sits on a red bar. Band positions are
-//! reconciled across slots because markers can throw off one row profile.
+//! Every cell of an ops frame is stamped from the same template: name at the top
+//! left, health bar under it. The bar is the one element with a fixed colour, so
+//! it is found first and everything else is measured from it.
+//!
+//! The bar drains right to left, so whatever red remains is anchored at its left
+//! edge: scanning a narrow strip at the left of the cell finds it at any fill
+//! level. Slots with no red left — dead players, empty frames — borrow the
+//! position the other slots agree on.
+//!
+//! The name is then the last run of glyph ink above the bar. Taking the whole
+//! strip above the bar instead would be simpler, but it drags in the frame border
+//! and the leader chevron, and it leaves so much empty space that upscaling to
+//! the recognition model's input height barely magnifies the text at all. Both
+//! cost accuracy, and the first character suffers worst.
 
 use baras_overlay::capture::CapturedImage;
 
@@ -23,19 +35,36 @@ pub enum BandKind {
     Health,
 }
 
+/// The health bar's position within a slot: `(top, height)` in pixels.
+pub type BarPosition = (u32, u32);
+
+/// Portion of the cell width searched for the bar's red remnant. The bar sits
+/// behind a border and a shaded left bevel of unpredictable width, so the search
+/// area is generous; what identifies a bar row is a solid red run, not the area's
+/// average colour.
+const LEFT_SEARCH_FRACTION: f32 = 0.25;
+/// Consecutive red (or, in a text gap, glyph-bright) pixels that mark a row.
+const MIN_RUN_PX: u32 = 3;
+/// A pixel counts as bar red past this much dominance over green and blue.
+const RED_DOMINANCE: i32 = 30;
+/// Anything thinner is a stray red pixel row, not a bar.
+const MIN_BAR_HEIGHT: u32 = 3;
+/// Bars thinner than this cannot render health text; recognizing them only
+/// invites hallucinated digits from a blank crop.
+const MIN_TEXT_BAR_HEIGHT: u32 = 8;
+/// Glyph ink is bright regardless of what it sits on.
+const BRIGHT_LUMA: u8 = 150;
+/// Fewer detected bars than this and an outlier cannot be told from the truth.
+const MIN_CONSENSUS_SLOTS: usize = 3;
+
 /// Rows whose ink coverage is below this fraction hold no text worth reading.
 const MIN_INK_FRACTION: f32 = 0.02;
-/// Rows above this are a solid fill (a full health bar), not glyphs.
+/// Rows above this are a solid fill, not glyphs.
 const MAX_INK_FRACTION: f32 = 0.75;
 /// Bands thinner than this cannot hold a legible glyph even after upscaling.
-const MIN_BAND_HEIGHT: u32 = 4;
+const MIN_NAME_HEIGHT: u32 = 4;
 /// Ignore the right edge when locating names. Raid markers and buff icons live there.
 pub(super) const NAME_SCAN_FRACTION: f32 = 0.75;
-/// A pixel counts as "red bar" past this much red dominance.
-const RED_DOMINANCE: i32 = 30;
-/// Broad red runs include markers; their dense core is the actual health bar.
-const MIN_HEALTH_RED_FRACTION: f32 = 0.25;
-const HEALTH_CORE_PEAK_FRACTION: f32 = 0.55;
 /// Offset from the slot median. Fixed thresholds miss dimmed frames.
 const INK_ABOVE_MEDIAN: u16 = 35;
 /// Floor for the ink threshold, so a nearly black slot does not treat noise as text.
@@ -47,17 +76,138 @@ fn luma(r: u8, g: u8, b: u8) -> u8 {
     (((r as u32 * 77) + (g as u32 * 150) + (b as u32 * 29)) >> 8) as u8
 }
 
-fn is_red_bar(r: u8, g: u8, b: u8) -> bool {
-    (r as i32 - g as i32) > RED_DOMINANCE && (r as i32 - b as i32) > RED_DOMINANCE
+/// Bar red, as distinct from everything else red-ish in a cell.
+///
+/// Dominance alone also accepts the orange resource strip under the bar; its
+/// green sits near half of red where the bar's is far below, so capping green
+/// separates them.
+fn is_bar_red(r: u8, g: u8, b: u8) -> bool {
+    (r as i32 - g as i32) > RED_DOMINANCE
+        && (r as i32 - b as i32) > RED_DOMINANCE
+        && (g as u32) * 2 < r as u32
 }
 
-/// Per-row statistics used to decide where text lives.
-struct RowProfile {
-    /// Fraction of pixels bright enough to be glyph ink.
-    ink: f32,
-    /// Fraction of pixels that look like the red health bar.
-    red: f32,
+// ─────────────────────────────────────────────────────────────────────────────
+// The bar
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Whether the left search area of a row holds a run of pixels satisfying `keep`,
+/// `MIN_RUN_PX` or longer.
+fn has_run(slot: &CapturedImage, y: u32, search: u32, keep: impl Fn(u8, u8, u8) -> bool) -> bool {
+    let mut run = 0u32;
+    for x in 0..search {
+        let Some((r, g, b, _)) = slot.pixel(x, y) else {
+            continue;
+        };
+        if keep(r, g, b) {
+            run += 1;
+            if run >= MIN_RUN_PX {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
 }
+
+/// Find the health bar by its red remnant near the cell's left edge.
+///
+/// The bar is the longest vertical extent of rows holding a solid red run. Health
+/// digits print over the bar's left edge and can carve bright gaps into its red
+/// profile, so red runs are bridged across short gaps whose rows still hold
+/// glyph-bright runs — the dark space above the bar never qualifies. Returns
+/// `None` for a slot with no bar to see: dead, empty, or drained out of the
+/// search area.
+pub fn detect_health_bar(slot: &CapturedImage) -> Option<BarPosition> {
+    if slot.width == 0 || slot.height < MIN_BAR_HEIGHT {
+        return None;
+    }
+    let search = ((slot.width as f32 * LEFT_SEARCH_FRACTION).round() as u32)
+        .max(MIN_RUN_PX)
+        .min(slot.width);
+
+    // Maximal runs of red rows.
+    let mut runs: Vec<BarPosition> = Vec::new();
+    let mut start: Option<u32> = None;
+    for y in 0..=slot.height {
+        let in_bar = y < slot.height && has_run(slot, y, search, is_bar_red);
+        if in_bar {
+            start.get_or_insert(y);
+        } else if let Some(s) = start.take() {
+            runs.push((s, y - s));
+        }
+    }
+
+    // Bridge across text rows. The cap keeps a stray red mark higher in the cell
+    // from chaining through bright name glyphs down to the bar.
+    let max_gap = slot.height / 4;
+    let mut merged: Vec<BarPosition> = Vec::new();
+    for (top, height) in runs {
+        match merged.last_mut() {
+            Some((prev_top, prev_height))
+                if top - (*prev_top + *prev_height) <= max_gap
+                    && (*prev_top + *prev_height..top).all(|y| {
+                        has_run(slot, y, search, |r, g, b| {
+                            is_bar_red(r, g, b) || luma(r, g, b) >= BRIGHT_LUMA
+                        })
+                    }) =>
+            {
+                *prev_height = top + height - *prev_top;
+            }
+            _ => merged.push((top, height)),
+        }
+    }
+
+    merged
+        .into_iter()
+        .max_by_key(|&(_, height)| height)
+        .filter(|&(_, height)| height >= MIN_BAR_HEIGHT)
+}
+
+/// Reconcile bar positions across the grid.
+///
+/// Cells are uniform, so one detected bar places every other one. Missing bars
+/// take the median of those found; with enough of a consensus, a bar far from it
+/// is an imposter — a red marker or icon that strayed into the strip — and is
+/// snapped back. Returns which slots hold an inferred rather than a seen bar:
+/// those are positioned well enough to read the name above them, but their bar
+/// carries no red, so recognizing its health band would read a blank crop.
+pub fn reconcile_bars(bars: &mut [Option<BarPosition>]) -> Vec<bool> {
+    let mut inferred = vec![false; bars.len()];
+    let found: Vec<BarPosition> = bars.iter().flatten().copied().collect();
+    if found.is_empty() {
+        return inferred;
+    }
+
+    let top = median(found.iter().map(|&(top, _)| top));
+    let height = median(found.iter().map(|&(_, height)| height));
+
+    if found.len() >= MIN_CONSENSUS_SLOTS {
+        let tolerance = (height / 2).max(2);
+        for (bar, flag) in bars.iter_mut().zip(&mut inferred) {
+            if let Some((t, h)) = *bar
+                && (t.abs_diff(top) > tolerance || h.abs_diff(height) > tolerance)
+            {
+                *bar = Some((top, height));
+                *flag = true;
+            }
+        }
+    }
+
+    for (bar, flag) in bars.iter_mut().zip(&mut inferred) {
+        if bar.is_none() {
+            *bar = Some((top, height));
+            *flag = true;
+        }
+    }
+
+    inferred
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The name
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Ink threshold for this slot, derived from its own brightness distribution.
 fn ink_threshold(slot: &CapturedImage) -> u8 {
@@ -85,212 +235,153 @@ fn ink_threshold(slot: &CapturedImage) -> u8 {
     (((median as u16 + INK_ABOVE_MEDIAN).min(255)) as u8).max(MIN_INK_LUMA)
 }
 
-fn profile_rows(slot: &CapturedImage) -> Vec<RowProfile> {
-    let mut rows = Vec::with_capacity(slot.height as usize);
+/// Fraction of each row, up to `bottom`, bright enough to be glyph ink.
+///
+/// Red pixels never count: a raid marker painted over the name area is not text.
+fn ink_rows(slot: &CapturedImage, bottom: u32) -> Vec<f32> {
     let ink_luma = ink_threshold(slot);
     let name_width =
         ((slot.width as f32 * NAME_SCAN_FRACTION).round() as u32).clamp(1, slot.width.max(1));
 
-    for y in 0..slot.height {
-        let mut ink = 0u32;
-        let mut red = 0u32;
+    (0..bottom.min(slot.height))
+        .map(|y| {
+            let mut ink = 0u32;
+            for x in 0..name_width {
+                let Some((r, g, b, _)) = slot.pixel(x, y) else {
+                    continue;
+                };
+                if !is_bar_red(r, g, b) && luma(r, g, b) >= ink_luma {
+                    ink += 1;
+                }
+            }
+            ink as f32 / name_width as f32
+        })
+        .collect()
+}
 
-        for x in 0..slot.width {
-            let Some((r, g, b, _)) = slot.pixel(x, y) else {
-                continue;
-            };
-            if is_red_bar(r, g, b) {
-                red += 1;
-            } else if x < name_width && luma(r, g, b) >= ink_luma {
-                ink += 1;
+/// The name band: the last run of ink above the bar.
+///
+/// Scanning up from the bar rather than taking the longest run avoids the taller
+/// runs made by role icons and buffs at the top of the frame.
+fn name_band(slot: &CapturedImage, bar_top: u32) -> Option<Band> {
+    let rows = ink_rows(slot, bar_top);
+    let has_ink = |v: f32| v > MIN_INK_FRACTION && v < MAX_INK_FRACTION;
+
+    let mut end: Option<u32> = None;
+    let mut found = None;
+    for (i, &row) in rows.iter().enumerate().rev() {
+        if has_ink(row) {
+            end.get_or_insert(i as u32 + 1);
+        } else if let Some(end) = end.take() {
+            let top = i as u32 + 1;
+            if end - top >= MIN_NAME_HEIGHT {
+                found = Some((top, end - top));
+                break;
             }
         }
-
-        rows.push(RowProfile {
-            ink: ink as f32 / name_width as f32,
-            red: red as f32 / slot.width.max(1) as f32,
-        });
     }
+    let (top, height) =
+        found.or_else(|| end.and_then(|end| (end >= MIN_NAME_HEIGHT).then_some((0, end))))?;
 
-    rows
+    Some(Band {
+        top,
+        height,
+        kind: BandKind::Name,
+    })
 }
 
-/// Per-row `(ink, red)` fractions, for diagnosing why a slot did or did not
-/// yield bands. Not used by detection itself.
-pub fn row_fractions(slot: &CapturedImage) -> Vec<(f32, f32)> {
-    profile_rows(slot).into_iter().map(|p| (p.ink, p.red)).collect()
-}
-
-/// Find at most one name band and one health band.
-pub fn detect_bands(slot: &CapturedImage) -> Vec<Band> {
-    if slot.height < MIN_BAND_HEIGHT || slot.width == 0 {
+/// The bands a slot's bar position implies.
+///
+/// The health band is only worth recognizing when the bar was actually seen and
+/// is tall enough to render text.
+pub fn slot_bands(slot: &CapturedImage, bar: Option<BarPosition>, inferred: bool) -> Vec<Band> {
+    let Some((top, height)) = bar else {
         return Vec::new();
-    }
-
-    let rows = profile_rows(slot);
+    };
     let mut bands = Vec::new();
 
-    if let Some(band) = health_band(&rows) {
-        bands.push(Band {
-            top: band.0,
-            height: band.1,
-            kind: BandKind::Health,
-        });
+    if let Some(name) = name_band(slot, top) {
+        bands.push(name);
     }
 
-    // Names sit directly above health. Starting there avoids taller runs made by
-    // role icons and buffs at the top of the frame.
-    let name_rows = bands
-        .first()
-        .map_or(rows.as_slice(), |health| &rows[..health.top as usize]);
-    let name_band = if bands.is_empty() {
-        longest_run(name_rows, |p| {
-            p.ink > MIN_INK_FRACTION && p.ink < MAX_INK_FRACTION && p.red < 0.10
-        })
-        .filter(|(_, len)| *len >= MIN_BAND_HEIGHT)
-    } else {
-        last_run_at_least(
-            name_rows,
-            |p| p.ink > MIN_INK_FRACTION && p.ink < MAX_INK_FRACTION,
-            MIN_BAND_HEIGHT,
-        )
-    };
-
-    if let Some(band) = name_band {
+    if !inferred && height >= MIN_TEXT_BAR_HEIGHT {
         bands.push(Band {
-            top: band.0,
-            height: band.1,
-            kind: BandKind::Name,
+            top,
+            height,
+            kind: BandKind::Health,
         });
     }
 
     bands
 }
 
-fn health_band(rows: &[RowProfile]) -> Option<(u32, u32)> {
-    let broad = longest_run(rows, |p| p.red > MIN_HEALTH_RED_FRACTION)
-        .filter(|(_, len)| *len >= MIN_BAND_HEIGHT)?;
-    let broad_rows = &rows[broad.0 as usize..(broad.0 + broad.1) as usize];
-    let peak = broad_rows.iter().map(|p| p.red).fold(0.0f32, f32::max);
-    let core_floor = (peak * HEALTH_CORE_PEAK_FRACTION).max(MIN_HEALTH_RED_FRACTION);
-
-    longest_run(broad_rows, |p| p.red >= core_floor)
-        .filter(|(_, len)| *len >= MIN_BAND_HEIGHT)
-        .map(|(top, height)| (broad.0 + top, height))
-        .or(Some(broad))
-}
-
-/// Longest consecutive run of rows satisfying `pred`, as `(start, length)`.
-fn longest_run(rows: &[RowProfile], pred: impl Fn(&RowProfile) -> bool) -> Option<(u32, u32)> {
-    let mut best: Option<(u32, u32)> = None;
-    let mut start: Option<u32> = None;
-
-    for (i, row) in rows.iter().enumerate() {
-        let i = i as u32;
-        if pred(row) {
-            start.get_or_insert(i);
-        } else if let Some(s) = start.take() {
-            let len = i - s;
-            if best.is_none_or(|(_, bl)| len > bl) {
-                best = Some((s, len));
-            }
-        }
-    }
-
-    if let Some(s) = start {
-        let len = rows.len() as u32 - s;
-        if best.is_none_or(|(_, bl)| len > bl) {
-            best = Some((s, len));
-        }
-    }
-
-    best
-}
-
-fn last_run_at_least(
-    rows: &[RowProfile],
-    pred: impl Fn(&RowProfile) -> bool,
-    min_height: u32,
-) -> Option<(u32, u32)> {
-    let mut end = None;
-
-    for (i, row) in rows.iter().enumerate().rev() {
-        if pred(row) {
-            end.get_or_insert(i as u32 + 1);
-        } else if let Some(end) = end.take() {
-            let top = i as u32 + 1;
-            if end - top >= min_height {
-                return Some((top, end - top));
-            }
-        }
-    }
-
-    end.and_then(|end| (end >= min_height).then_some((0, end)))
-}
+// ─────────────────────────────────────────────────────────────────────────────
+// Grid consensus
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Pull clear vertical outliers back to the grid median.
-/// Fewer readable slots than this and there is no consensus worth trusting.
-const MIN_CONSENSUS_SLOTS: usize = 3;
+///
+/// Names only. The health band is the bar, and [`reconcile_bars`] has already
+/// settled those across the grid — including which slots hold a borrowed position
+/// that must not be recognized. Correcting them a second time here would undo
+/// that, because this function cannot tell a seen bar from an inferred one.
+pub fn harmonize_names(per_slot: &mut [Vec<Band>]) {
+    const KIND: BandKind = BandKind::Name;
 
-pub fn harmonize(per_slot: &mut [Vec<Band>]) {
-    for kind in [BandKind::Name, BandKind::Health] {
-        // Bottoms, not tops: icons above the text stretch a band upward, never
-        // down, so the bottom is the edge the slots agree on.
-        let found: Vec<(u32, u32)> = per_slot
-            .iter()
-            .filter_map(|bands| {
-                bands
-                    .iter()
-                    .find(|b| b.kind == kind)
-                    .map(|b| (b.height, b.top + b.height))
-            })
-            .collect();
+    // Bottoms, not tops: icons above the text stretch a band upward, never down,
+    // so the bottom is the edge the slots agree on.
+    let found: Vec<(u32, u32)> = per_slot
+        .iter()
+        .filter_map(|bands| {
+            bands
+                .iter()
+                .find(|b| b.kind == KIND)
+                .map(|b| (b.height, b.top + b.height))
+        })
+        .collect();
 
-        if found.len() < MIN_CONSENSUS_SLOTS {
-            continue;
-        }
+    if found.len() < MIN_CONSENSUS_SLOTS {
+        return;
+    }
 
-        let heights: Vec<u32> = found.iter().map(|(height, _)| *height).collect();
-        let bottoms: Vec<u32> = found.iter().map(|(_, bottom)| *bottom).collect();
-        let consensus_height = median(&heights);
-        let consensus_bottom = median(&bottoms);
-        // Scales with the frame size.
-        let tolerance = (consensus_height * 2 / 5).max(2);
+    let heights: Vec<u32> = found.iter().map(|(height, _)| *height).collect();
+    let bottoms: Vec<u32> = found.iter().map(|(_, bottom)| *bottom).collect();
+    let consensus_height = median(heights.iter().copied());
+    let consensus_bottom = median(bottoms.iter().copied());
+    // Scales with the frame size.
+    let tolerance = (consensus_height * 2 / 5).max(2);
 
-        if drifting(&bottoms, tolerance) {
-            continue;
-        }
+    if drifting(&bottoms, tolerance) {
+        return;
+    }
 
-        for bands in per_slot.iter_mut() {
-            if let Some(band) = bands.iter_mut().find(|b| b.kind == kind) {
-                let bottom = band.top + band.height;
-                let too_tall = band.height.abs_diff(consensus_height) > tolerance;
-                let displaced = bottom.abs_diff(consensus_bottom) > tolerance;
+    for bands in per_slot.iter_mut() {
+        if let Some(band) = bands.iter_mut().find(|b| b.kind == KIND) {
+            let bottom = band.top + band.height;
+            let too_tall = band.height.abs_diff(consensus_height) > tolerance;
+            let displaced = bottom.abs_diff(consensus_bottom) > tolerance;
 
-                // Small variation is row-profile noise and the padding absorbs
-                // it. A band that only grew upward keeps its own bottom edge.
-                if too_tall || displaced {
-                    let anchor = if displaced { consensus_bottom } else { bottom };
-                    band.top = anchor.saturating_sub(consensus_height);
-                    band.height = consensus_height;
-                }
+            // Small variation is row-profile noise and the padding absorbs it. A
+            // band that only grew upward keeps its own bottom edge.
+            if too_tall || displaced {
+                let anchor = if displaced { consensus_bottom } else { bottom };
+                band.top = anchor.saturating_sub(consensus_height);
+                band.height = consensus_height;
             }
         }
+    }
 
-        // A slot holding the other band has a player in it, so a missing band is
-        // a detection failure rather than an empty frame. The health bar stops
-        // being red enough to find below about a quarter health, which is where
-        // the number matters most.
-        for bands in per_slot.iter_mut() {
-            if bands.is_empty() || bands.iter().any(|b| b.kind == kind) {
-                continue;
-            }
-            bands.push(Band {
-                top: consensus_bottom.saturating_sub(consensus_height),
-                height: consensus_height,
-                kind,
-            });
+    // A slot with a bar has a player in it, so a missing name is a detection
+    // failure rather than an empty frame.
+    for bands in per_slot.iter_mut() {
+        if bands.is_empty() || bands.iter().any(|b| b.kind == KIND) {
+            continue;
         }
+        bands.push(Band {
+            top: consensus_bottom.saturating_sub(consensus_height),
+            height: consensus_height,
+            kind: KIND,
+        });
     }
 }
 
@@ -311,8 +402,8 @@ fn drifting(bottoms: &[u32], tolerance: u32) -> bool {
 
 /// Lower middle on an even count, so tall bands cannot drag the consensus up
 /// toward themselves.
-fn median(values: &[u32]) -> u32 {
-    let mut sorted = values.to_vec();
+fn median(values: impl Iterator<Item = u32>) -> u32 {
+    let mut sorted: Vec<u32> = values.collect();
     sorted.sort_unstable();
     sorted[(sorted.len() - 1) / 2]
 }
@@ -321,42 +412,18 @@ fn median(values: &[u32]) -> u32 {
 mod tests {
     use super::*;
 
-    /// Build a slot image: dark panel, a light text row, and a red bar with
-    /// light glyphs — roughly how SWTOR draws an ops frame.
-    fn synthetic_slot() -> CapturedImage {
-        let (w, h) = (100u32, 40u32);
-        let mut rgba = vec![0u8; (w * h * 4) as usize];
+    const BAR_RED: (u8, u8, u8) = (200, 35, 45);
+    const RESOURCE_ORANGE: (u8, u8, u8) = (220, 160, 50);
 
-        for y in 0..h {
-            for x in 0..w {
-                let i = ((y * w + x) * 4) as usize;
-                let (r, g, b) = if (10..16).contains(&y) {
-                    // Name text: light glyphs on dark, roughly 30% coverage.
-                    if x % 3 == 0 {
-                        (220, 225, 235)
-                    } else {
-                        (30, 40, 60)
-                    }
-                } else if (22..32).contains(&y) {
-                    // Health bar: saturated red, with lighter digits on top.
-                    if x % 4 == 0 {
-                        (240, 240, 240)
-                    } else {
-                        (170, 30, 30)
-                    }
-                } else {
-                    (30, 40, 60)
-                };
-                rgba[i] = r;
-                rgba[i + 1] = g;
-                rgba[i + 2] = b;
-                rgba[i + 3] = 255;
-            }
+    /// A dark cell, roughly how SWTOR draws an ops frame background.
+    fn cell(width: u32, height: u32) -> CapturedImage {
+        let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+        for _ in 0..(width * height) {
+            rgba.extend_from_slice(&[30, 40, 60, 255]);
         }
-
         CapturedImage {
-            width: w,
-            height: h,
+            width,
+            height,
             rgba,
         }
     }
@@ -375,121 +442,280 @@ mod tests {
         }
     }
 
+    /// Light glyphs on the dark panel, roughly 30% coverage.
+    fn paint_text(image: &mut CapturedImage, x: std::ops::Range<u32>, y: std::ops::Range<u32>) {
+        for y in y {
+            for x in x.clone() {
+                if x % 3 == 0 {
+                    let i = ((y * image.width + x) * 4) as usize;
+                    image.rgba[i..i + 4].copy_from_slice(&[220, 225, 235, 255]);
+                }
+            }
+        }
+    }
+
+    /// A full ops cell: name row, then the health bar with digits on it.
+    fn synthetic_slot() -> CapturedImage {
+        let mut slot = cell(100, 40);
+        paint_text(&mut slot, 0..75, 10..16);
+        paint(&mut slot, 0..100, 22..32, BAR_RED);
+        for y in 24..30 {
+            for x in 0..60 {
+                if x % 4 == 0 {
+                    let i = ((y * slot.width + x) * 4) as usize;
+                    slot.rgba[i..i + 4].copy_from_slice(&[240, 240, 240, 255]);
+                }
+            }
+        }
+        slot
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // detect_health_bar
+    // ─────────────────────────────────────────────────────────────────────────
+
     #[test]
-    fn finds_both_bands() {
-        let bands = detect_bands(&synthetic_slot());
+    fn finds_a_full_bar() {
+        let mut slot = cell(100, 40);
+        paint(&mut slot, 0..100, 20..30, BAR_RED);
 
-        let health = bands.iter().find(|b| b.kind == BandKind::Health);
-        let name = bands.iter().find(|b| b.kind == BandKind::Name);
-
-        let health = health.expect("health bar should be found");
-        assert!(
-            (22..=23).contains(&health.top),
-            "health band started at {}",
-            health.top
-        );
-
-        let name = name.expect("name row should be found");
-        assert!(
-            (10..=11).contains(&name.top),
-            "name band started at {}",
-            name.top
-        );
+        assert_eq!(detect_health_bar(&slot), Some((20, 10)));
     }
 
     #[test]
-    fn red_marker_does_not_swallow_name_or_health() {
+    fn finds_a_nearly_drained_bar_by_its_left_remnant() {
+        let mut slot = cell(100, 40);
+        // ~8% health: red only survives at the bar's left edge.
+        paint(&mut slot, 0..8, 20..30, BAR_RED);
+
+        assert_eq!(detect_health_bar(&slot), Some((20, 10)));
+    }
+
+    /// Observed live: left-aligned health text carves the strip's red profile
+    /// into two slivers, and taking either sliver as the bar puts the digits into
+    /// the name band.
+    #[test]
+    fn digits_over_the_left_edge_do_not_split_the_bar() {
+        let mut slot = cell(100, 40);
+        paint(&mut slot, 0..100, 20..32, BAR_RED);
+        // "402,614 (84%)" starting at the bar's left edge.
+        paint(&mut slot, 2..60, 23..29, (235, 235, 235));
+
+        assert_eq!(detect_health_bar(&slot), Some((20, 12)));
+    }
+
+    #[test]
+    fn the_dark_gap_above_the_bar_is_never_bridged() {
+        let mut slot = cell(100, 40);
+        // A red marker high in the strip, dark background, then the bar.
+        paint(&mut slot, 0..12, 4..8, BAR_RED);
+        paint(&mut slot, 0..100, 20..30, BAR_RED);
+
+        assert_eq!(detect_health_bar(&slot), Some((20, 10)));
+    }
+
+    #[test]
+    fn the_orange_resource_strip_is_not_a_bar() {
+        let mut slot = cell(100, 40);
+        paint(&mut slot, 0..100, 32..36, RESOURCE_ORANGE);
+
+        assert_eq!(detect_health_bar(&slot), None, "orange is not the bar");
+    }
+
+    #[test]
+    fn the_resource_strip_does_not_stretch_the_bar_downward() {
+        let mut slot = cell(100, 40);
+        paint(&mut slot, 0..100, 20..30, BAR_RED);
+        paint(&mut slot, 0..100, 30..34, RESOURCE_ORANGE);
+
+        assert_eq!(detect_health_bar(&slot), Some((20, 10)));
+    }
+
+    #[test]
+    fn a_marker_away_from_the_left_edge_is_never_seen() {
+        let mut slot = cell(100, 40);
+        paint(&mut slot, 0..100, 20..30, BAR_RED);
+        // A red raid marker over the name area, right of the strip.
+        paint(&mut slot, 40..60, 2..12, (220, 20, 20));
+
+        assert_eq!(detect_health_bar(&slot), Some((20, 10)));
+    }
+
+    #[test]
+    fn an_empty_cell_yields_nothing() {
+        assert_eq!(detect_health_bar(&cell(100, 40)), None);
+    }
+
+    #[test]
+    fn a_stray_red_row_is_too_thin_to_be_a_bar() {
+        let mut slot = cell(100, 40);
+        paint(&mut slot, 0..100, 20..22, BAR_RED);
+
+        assert_eq!(detect_health_bar(&slot), None);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // reconcile_bars
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_missing_bar_borrows_the_grid_consensus() {
+        let mut bars = vec![Some((20, 10)), Some((21, 10)), Some((20, 10)), None];
+        let inferred = reconcile_bars(&mut bars);
+
+        assert_eq!(bars[3], Some((20, 10)));
+        assert_eq!(inferred, vec![false, false, false, true]);
+    }
+
+    #[test]
+    fn an_imposter_is_snapped_back_and_marked_inferred() {
+        // Slot 2 latched onto a red icon high in the cell.
+        let mut bars = vec![Some((20, 10)), Some((20, 10)), Some((4, 9)), Some((21, 10))];
+        let inferred = reconcile_bars(&mut bars);
+
+        assert_eq!(bars[2], Some((20, 10)));
+        assert!(inferred[2], "a corrected bar holds no red worth reading");
+        assert!(!inferred[0] && !inferred[3], "agreeing slots are left alone");
+    }
+
+    #[test]
+    fn two_bars_still_seed_the_missing_but_correct_no_outliers() {
+        let mut bars = vec![Some((20, 10)), Some((5, 10)), None];
+        let inferred = reconcile_bars(&mut bars);
+
+        // Too few to call either an imposter; the lower median seeds the gap.
+        assert_eq!(bars[0], Some((20, 10)));
+        assert_eq!(bars[1], Some((5, 10)));
+        assert_eq!(bars[2], Some((5, 10)));
+        assert_eq!(inferred, vec![false, false, true]);
+    }
+
+    #[test]
+    fn a_grid_with_no_bars_stays_empty() {
+        let mut bars = vec![None, None, None];
+        let inferred = reconcile_bars(&mut bars);
+
+        assert!(bars.iter().all(Option::is_none));
+        assert!(inferred.iter().all(|i| !i));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // slot_bands
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn finds_both_bands() {
+        let slot = synthetic_slot();
+        let bar = detect_health_bar(&slot).expect("health bar should be found");
+        let bands = slot_bands(&slot, Some(bar), false);
+
+        let health = bands
+            .iter()
+            .find(|b| b.kind == BandKind::Health)
+            .expect("health band");
+        assert_eq!((health.top, health.height), (22, 10));
+
+        let name = bands
+            .iter()
+            .find(|b| b.kind == BandKind::Name)
+            .expect("name band");
+        assert_eq!((name.top, name.height), (10, 6));
+    }
+
+    /// The name is measured from the bar, so it never reaches down into the
+    /// digits printed on it.
+    #[test]
+    fn the_name_stops_above_the_bar() {
+        let slot = synthetic_slot();
+        let bands = slot_bands(&slot, detect_health_bar(&slot), false);
+        let name = bands.iter().find(|b| b.kind == BandKind::Name).unwrap();
+
+        assert!(name.top + name.height <= 22, "name ran into the bar: {name:?}");
+    }
+
+    #[test]
+    fn a_name_nearest_the_bar_wins_over_icons_higher_up() {
+        let mut slot = synthetic_slot();
+        // A bright role icon at the top of the cell, taller than the name.
+        paint(&mut slot, 0..40, 1..8, (225, 230, 240));
+
+        let bands = slot_bands(&slot, detect_health_bar(&slot), false);
+        let name = bands.iter().find(|b| b.kind == BandKind::Name).unwrap();
+
+        assert_eq!((name.top, name.height), (10, 6));
+    }
+
+    #[test]
+    fn a_red_marker_swallows_neither_band() {
         let mut slot = synthetic_slot();
         paint(&mut slot, 60..95, 2..40, (220, 20, 20));
 
-        let bands = detect_bands(&slot);
-        let health = bands
-            .iter()
-            .find(|band| band.kind == BandKind::Health)
-            .expect("health bar should survive the marker");
-        let name = bands
-            .iter()
-            .find(|band| band.kind == BandKind::Name)
-            .expect("name should survive the marker");
+        let bands = slot_bands(&slot, detect_health_bar(&slot), false);
+        let health = bands.iter().find(|b| b.kind == BandKind::Health).unwrap();
+        let name = bands.iter().find(|b| b.kind == BandKind::Name).unwrap();
 
         assert_eq!((health.top, health.height), (22, 10));
         assert_eq!((name.top, name.height), (10, 6));
     }
 
     #[test]
-    fn name_nearest_health_wins_over_icons() {
-        let mut slot = synthetic_slot();
-        paint(&mut slot, 0..40, 1..8, (225, 230, 240));
+    fn a_thin_bar_cannot_hold_text_so_only_the_name_is_read() {
+        let slot = synthetic_slot();
+        let bands = slot_bands(&slot, Some((22, 5)), false);
 
-        let bands = detect_bands(&slot);
-        let name = bands
-            .iter()
-            .find(|band| band.kind == BandKind::Name)
-            .expect("name should be found");
-
-        assert_eq!((name.top, name.height), (10, 6));
+        assert!(bands.iter().all(|b| b.kind == BandKind::Name));
     }
 
     #[test]
-    fn empty_slot_yields_nothing() {
+    fn an_inferred_bar_places_the_name_but_is_not_recognized_itself() {
+        let slot = synthetic_slot();
+        let bands = slot_bands(&slot, Some((22, 10)), true);
+
+        assert!(bands.iter().all(|b| b.kind == BandKind::Name));
+    }
+
+    #[test]
+    fn no_bar_means_no_bands() {
+        assert!(slot_bands(&synthetic_slot(), None, false).is_empty());
+    }
+
+    #[test]
+    fn an_empty_cell_yields_no_name() {
         let flat = CapturedImage {
             width: 50,
             height: 30,
             rgba: vec![20u8; 50 * 30 * 4],
         };
-        assert!(detect_bands(&flat).is_empty());
+        assert!(slot_bands(&flat, Some((20, 10)), false)
+            .iter()
+            .all(|b| b.kind == BandKind::Health));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // harmonize_names
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fn name(top: u32, height: u32) -> Vec<Band> {
+        vec![Band {
+            top,
+            height,
+            kind: BandKind::Name,
+        }]
     }
 
     #[test]
-    fn tiny_slot_is_rejected() {
-        let tiny = CapturedImage {
-            width: 10,
-            height: 2,
-            rgba: vec![255u8; 10 * 2 * 4],
-        };
-        assert!(detect_bands(&tiny).is_empty());
-    }
-
-    #[test]
-    fn harmonize_pulls_outlier_to_consensus() {
-        let good = vec![Band {
-            top: 10,
-            height: 6,
-            kind: BandKind::Name,
-        }];
-        let outlier = vec![Band {
-            top: 30,
-            height: 6,
-            kind: BandKind::Name,
-        }];
-
-        let mut slots = vec![good.clone(), good.clone(), good.clone(), outlier];
-        harmonize(&mut slots);
+    fn pulls_an_outlier_to_the_consensus() {
+        let mut slots = vec![name(10, 6), name(10, 6), name(10, 6), name(30, 6)];
+        harmonize_names(&mut slots);
 
         assert_eq!(slots[3][0].top, 10, "outlier should snap to the consensus");
         assert_eq!(slots[0][0].top, 10, "agreeing slots must be left alone");
     }
 
     #[test]
-    fn harmonize_leaves_minor_variation_alone() {
-        let mut slots = vec![
-            vec![Band {
-                top: 10,
-                height: 6,
-                kind: BandKind::Name,
-            }],
-            vec![Band {
-                top: 11,
-                height: 6,
-                kind: BandKind::Name,
-            }],
-            vec![Band {
-                top: 12,
-                height: 6,
-                kind: BandKind::Name,
-            }],
-        ];
-        harmonize(&mut slots);
+    fn leaves_minor_variation_alone() {
+        let mut slots = vec![name(10, 6), name(11, 6), name(12, 6)];
+        harmonize_names(&mut slots);
 
         assert_eq!(slots[1][0].top, 11);
         assert_eq!(slots[2][0].top, 12);
@@ -498,7 +724,7 @@ mod tests {
     /// Bands measured off a live 8-man frame. Slots 4 and 7 swallowed the icons
     /// above the text: tops ten pixels high, bottoms unchanged.
     #[test]
-    fn harmonize_trims_a_band_that_only_grew_upward() {
+    fn trims_a_band_that_only_grew_upward() {
         let observed = [
             (13, 9),
             (10, 13),
@@ -511,16 +737,10 @@ mod tests {
         ];
         let mut slots: Vec<Vec<Band>> = observed
             .iter()
-            .map(|&(top, height)| {
-                vec![Band {
-                    top,
-                    height,
-                    kind: BandKind::Name,
-                }]
-            })
+            .map(|&(top, height)| name(top, height))
             .collect();
 
-        harmonize(&mut slots);
+        harmonize_names(&mut slots);
 
         for (slot, band) in slots.iter().enumerate() {
             let band = band[0];
@@ -541,82 +761,97 @@ mod tests {
 
     /// Bands creeping one way are a misaligned overlay, not misdetection.
     #[test]
-    fn harmonize_leaves_a_drifting_grid_alone() {
+    fn leaves_a_drifting_grid_alone() {
         let mut slots: Vec<Vec<Band>> = [3, 6, 9, 12, 15, 18]
             .iter()
-            .map(|&top| {
-                vec![Band {
-                    top,
-                    height: 6,
-                    kind: BandKind::Name,
-                }]
-            })
+            .map(|&top| name(top, 6))
             .collect();
 
-        harmonize(&mut slots);
+        harmonize_names(&mut slots);
 
         assert_eq!(slots[0][0].top, 3);
         assert_eq!(slots[5][0].top, 18);
     }
 
-    /// A low health bar carries too little red to be found, so the slot inherits
-    /// the band the others agree on. An empty frame still gets nothing.
     #[test]
-    fn harmonize_fills_in_a_band_the_slot_could_not_find() {
-        let full = |top| {
-            vec![
-                Band {
-                    top,
-                    height: 18,
-                    kind: BandKind::Health,
-                },
-                Band {
-                    top: 10,
-                    height: 13,
-                    kind: BandKind::Name,
-                },
-            ]
-        };
-        let mut slots = vec![
-            full(24),
-            full(24),
-            full(23),
-            // Read at 18% health: a name, but no health bar red enough to find.
+    fn needs_enough_slots_to_have_an_opinion() {
+        let mut slots = vec![name(10, 6), name(30, 6)];
+        harmonize_names(&mut slots);
+
+        assert_eq!(slots[1][0].top, 30, "too few slots to override anything");
+    }
+
+    /// A slot that found a bar but no name inherits the band the others agree on.
+    #[test]
+    fn fills_in_a_name_the_slot_could_not_find() {
+        let health = || {
             vec![Band {
-                top: 10,
-                height: 13,
-                kind: BandKind::Name,
-            }],
+                top: 24,
+                height: 18,
+                kind: BandKind::Health,
+            }]
+        };
+        let mut with_both = name(10, 13);
+        with_both.push(health()[0]);
+
+        let mut slots = vec![
+            with_both.clone(),
+            with_both.clone(),
+            with_both,
+            health(),
             Vec::new(),
         ];
-
-        harmonize(&mut slots);
+        harmonize_names(&mut slots);
 
         let filled = slots[3]
             .iter()
-            .find(|b| b.kind == BandKind::Health)
-            .expect("slot with a name should inherit the health band");
-        assert_eq!((filled.top, filled.height), (24, 18));
+            .find(|b| b.kind == BandKind::Name)
+            .expect("slot with a bar should inherit the name band");
+        assert_eq!((filled.top, filled.height), (10, 13));
         assert!(slots[4].is_empty(), "an empty frame invents nothing");
     }
 
-    /// Two readable slots agree about nothing worth acting on.
+    /// The guard that made this function names-only: a slot whose bar was only
+    /// inferred carries a name band and no health band, and must keep it that way.
     #[test]
-    fn harmonize_needs_enough_slots_to_have_an_opinion() {
+    fn never_invents_a_health_band() {
         let mut slots = vec![
-            vec![Band {
-                top: 10,
-                height: 6,
-                kind: BandKind::Name,
-            }],
-            vec![Band {
-                top: 30,
-                height: 6,
-                kind: BandKind::Name,
-            }],
+            {
+                let mut b = name(10, 13);
+                b.push(Band {
+                    top: 24,
+                    height: 18,
+                    kind: BandKind::Health,
+                });
+                b
+            },
+            {
+                let mut b = name(10, 13);
+                b.push(Band {
+                    top: 24,
+                    height: 18,
+                    kind: BandKind::Health,
+                });
+                b
+            },
+            {
+                let mut b = name(10, 13);
+                b.push(Band {
+                    top: 24,
+                    height: 18,
+                    kind: BandKind::Health,
+                });
+                b
+            },
+            // Bar inferred: name only, deliberately no health band.
+            name(10, 13),
         ];
-        harmonize(&mut slots);
+        harmonize_names(&mut slots);
 
-        assert_eq!(slots[1][0].top, 30, "too few slots to override anything");
+        assert!(
+            slots[3].iter().all(|b| b.kind == BandKind::Name),
+            "an inferred slot must not be handed a health band: {:?}",
+            slots[3]
+        );
     }
 }

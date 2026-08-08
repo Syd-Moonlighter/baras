@@ -15,7 +15,8 @@ use std::sync::OnceLock;
 use rayon::prelude::*;
 
 use analysis::{
-    Band, BandKind, PreparedCrop, detect_bands, harmonize, parse_health_text, prepare,
+    Band, BandKind, BarPosition, PreparedCrop, detect_health_bar, harmonize_names,
+    parse_health_text, prepare, reconcile_bars, slot_bands,
 };
 use baras_core::raid_detect::{
     MIN_OCR_NAME_CHARS, MatchConfig, PlayerCandidate, RowAssignment, RowObservation,
@@ -89,24 +90,39 @@ pub fn observe_slots_dumping(
         dump.capture(image);
     }
 
-    // Find every band first so outliers can be corrected across the grid.
+    // Find every bar first, so slots that lost theirs can borrow the grid's.
     let mut slot_images = Vec::with_capacity(slots.len());
-    let mut per_slot_bands = Vec::with_capacity(slots.len());
+    let mut bars: Vec<Option<BarPosition>> = Vec::with_capacity(slots.len());
 
     for &(_, x, y, w, h) in slots {
         match image.crop(x, y, w, h) {
             Some(slot_image) => {
-                per_slot_bands.push(detect_bands(&slot_image));
+                bars.push(detect_health_bar(&slot_image));
                 slot_images.push(Some(slot_image));
             }
             None => {
-                per_slot_bands.push(Vec::new());
+                bars.push(None);
                 slot_images.push(None);
             }
         }
     }
 
-    harmonize(&mut per_slot_bands);
+    let inferred = reconcile_bars(&mut bars);
+
+    let mut per_slot_bands: Vec<Vec<Band>> = slot_images
+        .iter()
+        .zip(&bars)
+        .zip(&inferred)
+        .map(|((slot_image, bar), inferred)| {
+            slot_image
+                .as_ref()
+                .map_or_else(Vec::new, |slot| slot_bands(slot, *bar, *inferred))
+        })
+        .collect();
+
+    // Names only: the bars were already reconciled, and this cannot tell a seen
+    // bar from a borrowed one.
+    harmonize_names(&mut per_slot_bands);
 
     // Prepare everything first: crops can only overlap once they all exist.
     // Bands outside their slot stay `None` so readings keep lining up.
@@ -137,6 +153,7 @@ pub fn observe_slots_dumping(
                 slot_rect.0,
                 (slot_rect.1, slot_rect.2, slot_rect.3, slot_rect.4),
             );
+            dump.bar(slot_rect.0, bars[slot_index], inferred[slot_index]);
             if slot_bands.is_empty() {
                 dump.no_bands(slot_rect.0);
             }
