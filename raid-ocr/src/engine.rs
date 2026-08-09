@@ -15,17 +15,19 @@ use sha2::{Digest, Sha256};
 
 use crate::analysis::PreparedCrop;
 
+// Upstream ocrs bucket first; our mirror at baras-app/ocr-models is the
+// fallback when the bucket is unreachable or serves a different hash.
 const RECOGNITION_MODEL_URLS: &[&str] = &[
-    "https://raw.githubusercontent.com/baras-app/baras/master/raid-ocr/model/text-recognition.rten",
     "https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten",
+    "https://raw.githubusercontent.com/baras-app/ocr-models/main/text-recognition.rten",
 ];
 
 const RECOGNITION_MODEL_SHA256: &str =
     "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e";
 
 const DETECTION_MODEL_URLS: &[&str] = &[
-    "https://raw.githubusercontent.com/baras-app/baras/master/raid-ocr/model/text-detection.rten",
     "https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten",
+    "https://raw.githubusercontent.com/baras-app/ocr-models/main/text-detection.rten",
 ];
 
 const DETECTION_MODEL_SHA256: &str =
