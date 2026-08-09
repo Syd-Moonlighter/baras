@@ -9,17 +9,25 @@ pub const MAX_OVERLAY_HEIGHT: u32 = 2048;
 pub const RESIZE_CORNER_SIZE: i32 = 20;
 pub const SNAP_GRID_SIZE: i32 = 10;
 
-/// Snap a value to the nearest grid point
+/// Snap a value to the nearest grid point; identity when snapping is off.
 #[inline]
-pub fn snap_to_grid(value: i32) -> i32 {
-    ((value + SNAP_GRID_SIZE / 2) / SNAP_GRID_SIZE) * SNAP_GRID_SIZE
+pub fn snap_to_grid(value: i32, snap: bool) -> i32 {
+    if snap {
+        ((value + SNAP_GRID_SIZE / 2) / SNAP_GRID_SIZE) * SNAP_GRID_SIZE
+    } else {
+        value
+    }
 }
 
-/// Snap a size (u32) to the nearest grid point, respecting min/max constraints
+/// Snap a size (u32) to the nearest grid point; identity when snapping is off.
 #[inline]
-pub fn snap_size_to_grid(value: u32) -> u32 {
-    let v = value as i32;
-    ((v + SNAP_GRID_SIZE / 2) / SNAP_GRID_SIZE * SNAP_GRID_SIZE) as u32
+pub fn snap_size_to_grid(value: u32, snap: bool) -> u32 {
+    if snap {
+        let v = value as i32;
+        ((v + SNAP_GRID_SIZE / 2) / SNAP_GRID_SIZE * SNAP_GRID_SIZE) as u32
+    } else {
+        value
+    }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -247,6 +255,9 @@ pub struct OverlayConfig {
     pub namespace: String,
     /// Whether clicks pass through the overlay
     pub click_through: bool,
+    /// Whether move/resize snaps to the alignment grid. Off for overlays that
+    /// must line up with a game UI element rather than with other overlays.
+    pub snap_to_grid: bool,
     /// Target monitor ID for multi-monitor support.
     /// On Wayland, this is used to select which output to render on.
     /// If None or not found, the compositor chooses (typically primary).
@@ -262,6 +273,7 @@ impl Default for OverlayConfig {
             height: 150,
             namespace: "baras-overlay".to_string(),
             click_through: true,
+            snap_to_grid: true,
             target_monitor_id: None,
         }
     }

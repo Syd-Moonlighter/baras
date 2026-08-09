@@ -423,6 +423,7 @@ struct WaylandState {
 
     // Mode tracking for optimization
     click_through: bool,
+    snap_to_grid: bool,
     drag_enabled: bool,
     pending_click: Option<(f32, f32)>,
 
@@ -450,7 +451,14 @@ struct ShmBuffer {
 unsafe impl Send for ShmBuffer {}
 
 impl WaylandState {
-    fn new(width: u32, height: u32, x: i32, y: i32, click_through: bool) -> Self {
+    fn new(
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+        click_through: bool,
+        snap_to_grid: bool,
+    ) -> Self {
         let pixel_count = (width * height) as usize;
         Self {
             running: true,
@@ -489,6 +497,7 @@ impl WaylandState {
             position_dirty: false,
             pending_resize: None,
             click_through,
+            snap_to_grid,
             drag_enabled: true,
             pending_click: None,
             pending_output_rebind: None,
@@ -795,6 +804,7 @@ impl OverlayPlatform for WaylandOverlay {
             config.x,
             config.y,
             config.click_through,
+            config.snap_to_grid,
         );
 
         // Bind globals
@@ -1541,8 +1551,8 @@ impl Dispatch<WlPointer, ()> for WaylandState {
                         state.pending_height = clamped_height;
                         // Snap only the value applied to the window
                         state.pending_resize = Some((
-                            super::snap_size_to_grid(clamped_width),
-                            super::snap_size_to_grid(clamped_height),
+                            super::snap_size_to_grid(clamped_width, state.snap_to_grid),
+                            super::snap_size_to_grid(clamped_height, state.snap_to_grid),
                         ));
                     }
 
@@ -1641,8 +1651,14 @@ impl Dispatch<ZwpRelativePointerV1, ()> for WaylandState {
                 state.drag_accum_y += dy;
 
                 // Calculate new window position (relative to current output)
-                let new_x = super::snap_to_grid(state.drag_start_window_x + state.drag_accum_x as i32);
-                let new_y = super::snap_to_grid(state.drag_start_window_y + state.drag_accum_y as i32);
+                let new_x = super::snap_to_grid(
+                    state.drag_start_window_x + state.drag_accum_x as i32,
+                    state.snap_to_grid,
+                );
+                let new_y = super::snap_to_grid(
+                    state.drag_start_window_y + state.drag_accum_y as i32,
+                    state.snap_to_grid,
+                );
 
                 // Check if this position would cross into a different monitor
                 if let Some((out_x, out_y, _, _)) = state.bound_output_bounds {

@@ -314,6 +314,7 @@ pub struct WindowsOverlay {
     bgra_buffer: Vec<u8>, // Pre-allocated buffer for RGBA->BGRA conversion
     content_dirty: bool,  // Track if pixel content changed
     click_through: bool,
+    snap_to_grid: bool,
     position_dirty: bool,
 
     // Interaction state
@@ -659,6 +660,7 @@ impl OverlayPlatform for WindowsOverlay {
             bgra_buffer: vec![0u8; (config.width * config.height * 4) as usize],
             content_dirty: true, // Initial render needed
             click_through: config.click_through,
+            snap_to_grid: config.snap_to_grid,
             position_dirty: false,
             pointer_x: 0,
             pointer_y: 0,
@@ -942,8 +944,8 @@ impl OverlayPlatform for WindowsOverlay {
                             let dx = pt.x - self.drag_start_screen_x;
                             let dy = pt.y - self.drag_start_screen_y;
                             self.set_position(
-                                super::snap_to_grid(self.drag_start_win_x + dx),
-                                super::snap_to_grid(self.drag_start_win_y + dy),
+                                super::snap_to_grid(self.drag_start_win_x + dx, self.snap_to_grid),
+                                super::snap_to_grid(self.drag_start_win_y + dy, self.snap_to_grid),
                             );
                         } else if self.is_resizing {
                             // Resize uses client coordinates (size changes, position doesn't)
@@ -957,8 +959,8 @@ impl OverlayPlatform for WindowsOverlay {
                                 .max(MIN_OVERLAY_SIZE as i32)
                                 .min(MAX_OVERLAY_HEIGHT as i32)
                                 as u32;
-                            let snapped_w = super::snap_size_to_grid(raw_w);
-                            let snapped_h = super::snap_size_to_grid(raw_h);
+                            let snapped_w = super::snap_size_to_grid(raw_w, self.snap_to_grid);
+                            let snapped_h = super::snap_size_to_grid(raw_h, self.snap_to_grid);
 
                             // Live resize - update immediately for visual feedback
                             if snapped_w != self.width || snapped_h != self.height {

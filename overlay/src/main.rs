@@ -41,6 +41,7 @@ mod examples {
             width: 280,
             height: 200,
             namespace: "baras-dps-metric".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -176,6 +177,7 @@ mod examples {
             width: 300,
             height: 280,
             namespace: "baras-dps-metric-8".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -286,6 +288,7 @@ mod examples {
             width: 320,
             height: 450,
             namespace: "baras-dps-metric-16".to_string(),
+            snap_to_grid: true,
             click_through: false, // Moveable
             target_monitor_id: None,
         };
@@ -415,6 +418,7 @@ mod examples {
             width: 220,
             height: 200,
             namespace: "baras-raid-normal".to_string(),
+            snap_to_grid: true,
             click_through: true, // Will be set by InteractionMode::Normal
             target_monitor_id: None,
         };
@@ -426,6 +430,7 @@ mod examples {
             width: 220,
             height: 200,
             namespace: "baras-raid-move".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -437,6 +442,7 @@ mod examples {
             width: 220,
             height: 200,
             namespace: "baras-raid-rearrange".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -645,6 +651,7 @@ mod examples {
             width: 500, // Wider to accommodate larger effects
             height: 450,
             namespace: "baras-raid-timer-test".to_string(),
+            snap_to_grid: true,
             click_through: true,
             target_monitor_id: None,
         };
@@ -825,6 +832,7 @@ mod examples {
             width: 240,
             height: 180,
             namespace: "baras-timers".to_string(),
+            snap_to_grid: true,
             click_through: true,
             target_monitor_id: None,
         };
@@ -919,6 +927,7 @@ mod examples {
             width: 340,
             height: 400,
             namespace: "baras-challenges".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -1334,6 +1343,7 @@ mod examples {
             width: 900,
             height: 280,
             namespace: "baras-challenges-horiz".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -1593,6 +1603,7 @@ mod examples {
                 width: 280,
                 height: 200,
                 namespace: format!("baras-boss-font-{}", col),
+                snap_to_grid: true,
                 click_through: true,
                 target_monitor_id: None,
             };
@@ -1631,6 +1642,7 @@ mod examples {
                 width: 280,
                 height: 300,
                 namespace: format!("baras-boss-content-{}", col),
+                snap_to_grid: true,
                 click_through: true,
                 target_monitor_id: None,
             };
@@ -1662,6 +1674,7 @@ mod examples {
                 width: 300,
                 height: 350,
                 namespace: "baras-boss-markers-shields".to_string(),
+                snap_to_grid: true,
                 click_through: true,
                 target_monitor_id: None,
             };
@@ -1726,6 +1739,7 @@ mod examples {
             width: 280,
             height: 140,
             namespace: "baras-alerts".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };
@@ -1815,6 +1829,7 @@ mod examples {
             width: 240,
             height: 260,
             namespace: "baras-ability-queue".to_string(),
+            snap_to_grid: true,
             click_through: true,
             target_monitor_id: None,
         };
@@ -2093,6 +2108,7 @@ mod examples {
             width: 180,
             height: 80,
             namespace: "baras-combat-time".to_string(),
+            snap_to_grid: true,
             click_through: false,
             target_monitor_id: None,
         };

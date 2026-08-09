@@ -510,6 +510,7 @@ pub fn create_metric_overlay(
         width: position.width,
         height: position.height,
         namespace: overlay_type.namespace().to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -566,6 +567,7 @@ pub fn create_personal_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-personal".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -604,6 +606,9 @@ pub fn create_raid_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-raid".to_string(),
+        // Free positioning: the raid frames align with the game's own UI
+        // element, not with other overlays.
+        snap_to_grid: false,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -640,6 +645,7 @@ pub fn create_boss_health_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-boss-health".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -673,6 +679,7 @@ pub fn create_timers_a_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-timers".to_string(), // Keep original namespace for backward compat
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -706,6 +713,7 @@ pub fn create_timers_b_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-timers-b".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -739,6 +747,7 @@ pub fn create_challenges_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-challenges".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -772,6 +781,7 @@ pub fn create_alerts_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-alerts".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -807,6 +817,7 @@ pub fn create_effects_a_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-effects-a".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -866,6 +877,7 @@ pub fn create_effects_b_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-effects-b".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -923,6 +935,7 @@ pub fn create_cooldowns_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-cooldowns".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -974,6 +987,7 @@ pub fn create_dot_tracker_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-dot-tracker".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -1024,6 +1038,7 @@ pub fn create_notes_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-notes".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -1064,6 +1079,7 @@ pub fn create_combat_time_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-combat-time".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -1105,6 +1121,7 @@ pub fn create_operation_timer_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-operation-timer".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };
@@ -1145,6 +1162,7 @@ pub fn create_ability_queue_overlay(
         width: position.width,
         height: position.height,
         namespace: "baras-ability-queue".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: position.monitor_id.clone(),
     };

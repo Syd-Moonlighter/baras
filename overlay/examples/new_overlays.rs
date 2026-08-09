@@ -45,6 +45,7 @@ fn main() {
         width: 350,
         height: 80,
         namespace: "effects_a_example".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: None,
     };
@@ -56,6 +57,7 @@ fn main() {
         width: 300,
         height: 200,
         namespace: "effects_bar_example".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: None,
     };
@@ -66,6 +68,7 @@ fn main() {
         width: 220,
         height: 320,
         namespace: "cooldowns_example".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: None,
     };
@@ -76,6 +79,7 @@ fn main() {
         width: 300,
         height: 200,
         namespace: "dot_tracker_example".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: None,
     };
@@ -87,6 +91,7 @@ fn main() {
         width: 320,
         height: 400,
         namespace: "dot_tracker_bar_example".to_string(),
+        snap_to_grid: true,
         click_through: true,
         target_monitor_id: None,
     };
