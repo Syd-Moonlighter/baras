@@ -215,9 +215,12 @@ fn raid_detection_message(
         return "No names detected. Frames unchanged.".to_string();
     }
     let noun = if names == 1 { "name" } else { "names" };
-    let mut message = format!(
-        "{names} {noun} detected. {matched}/{names} matched, {pending}/{names} pending player appearance in logs."
-    );
+    let mut message = format!("{names} {noun} detected. {matched}/{names} matched.");
+    if pending > 0 {
+        message.push_str(&format!(
+            " {pending}/{names} pending player appearance in logs."
+        ));
+    }
     // The one outcome another read cannot fix.
     if ambiguous > 0 {
         message.push_str(" Some names too similar. Manual assignment recommended.");
@@ -969,15 +972,16 @@ mod raid_detection_message_tests {
     fn counts_are_against_names_read() {
         assert_eq!(
             raid_detection_message(7, 3, 4, 0),
-            "7 names detected. 3/7 matched, 4/7 pending player appearance in logs."
+            "7 names detected. 3/7 matched. 4/7 pending player appearance in logs."
         );
     }
 
+    /// Nothing pending means nothing to wait for — the pending clause is omitted.
     #[test]
-    fn a_full_match_still_reports_both_counts() {
+    fn a_full_match_omits_the_pending_count() {
         assert_eq!(
             raid_detection_message(4, 4, 0, 0),
-            "4 names detected. 4/4 matched, 0/4 pending player appearance in logs."
+            "4 names detected. 4/4 matched."
         );
     }
 
@@ -996,7 +1000,7 @@ mod raid_detection_message_tests {
     fn lookalikes_ask_for_manual_assignment() {
         assert_eq!(
             raid_detection_message(8, 6, 0, 2),
-            "8 names detected. 6/8 matched, 0/8 pending player appearance in logs. \
+            "8 names detected. 6/8 matched. \
              Some names too similar. Manual assignment recommended."
         );
     }
@@ -1005,7 +1009,7 @@ mod raid_detection_message_tests {
     fn one_name_reads_singular() {
         assert_eq!(
             raid_detection_message(1, 0, 1, 0),
-            "1 name detected. 0/1 matched, 1/1 pending player appearance in logs."
+            "1 name detected. 0/1 matched. 1/1 pending player appearance in logs."
         );
     }
 }
