@@ -60,7 +60,7 @@ fn main() {
             continue;
         }
 
-        let observations = observe_slots(&capture, &rects);
+        let observations = observe_slots(&capture, &rects).rows;
         let new_names: BTreeMap<u8, String> = observations
             .iter()
             .filter_map(|o| {

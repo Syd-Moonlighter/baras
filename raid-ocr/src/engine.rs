@@ -446,7 +446,8 @@ fn detect(
 /// The widest run of text columns, bridging word spaces.
 fn span_from_lit(lit: &[bool], width: u32, height: u32) -> Option<Span> {
     // Word spaces read as unlit. Bridge them; anything wider is the icon gap.
-    let max_gap = height.max(1) as usize;
+    // Measured at the crop's fixed height.
+    let max_gap = (height.max(1) / 2) as usize;
     let mut best: Option<Run> = None;
     let mut current: Option<Run> = None;
     let mut gap = 0usize;
