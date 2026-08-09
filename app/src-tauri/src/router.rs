@@ -333,10 +333,10 @@ async fn detect_raid_names(
         return;
     }
 
+    // Applied even with zero matches: a pass that read names is authoritative,
+    // and inside it evicts registered players it no longer saw.
     let matched = assignments.len();
-    if matched > 0 {
-        let _ = service_handle.apply_raid_detection(assignments).await;
-    }
+    let _ = service_handle.apply_raid_detection(assignments).await;
     let (pending, _) = service_handle.apply_provisional_raid_detection(names).await;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
 

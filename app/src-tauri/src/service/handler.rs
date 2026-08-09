@@ -471,6 +471,10 @@ impl ServiceHandle {
                 .raid_registry
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
+            // The screen is the authority: players the pass did not
+            // re-confirm are evicted before the confirmed ones are placed.
+            let confirmed: Vec<i64> = assignments.iter().map(|a| a.entity_id).collect();
+            registry.retain_players(&confirmed);
             registry.assign_slots(
                 assignments
                     .into_iter()

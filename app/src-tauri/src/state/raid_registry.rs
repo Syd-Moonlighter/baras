@@ -166,6 +166,29 @@ impl RaidSlotRegistry {
         }
     }
 
+    /// Make a detection pass authoritative for registered players: whoever it
+    /// did not re-confirm left the group or is no longer on screen, and must
+    /// not shadow what the frames actually show. Disciplines are saved for
+    /// their return.
+    pub fn retain_players(&mut self, confirmed: &[i64]) {
+        for entry in &mut self.slots {
+            match entry.occupant.take() {
+                Some(SlotOccupant::Player(player))
+                    if !confirmed.contains(&player.entity_id) =>
+                {
+                    if let (Some(class_id), Some(discipline_id)) =
+                        (player.class_id, player.discipline_id)
+                    {
+                        self.pending_disciplines
+                            .insert(player.entity_id, (class_id, discipline_id));
+                    }
+                    entry.ambiguous = false;
+                }
+                keep => entry.occupant = keep,
+            }
+        }
+    }
+
     /// Apply a detection batch without losing metadata during swaps.
     pub fn assign_slots(&mut self, assignments: impl IntoIterator<Item = (u8, i64, String)>) {
         let mut seen_slots = HashSet::new();
@@ -520,6 +543,30 @@ mod tests {
         assert_eq!(registry.set_max_slots(2), 1);
         assert_eq!(registry.get_player(0).map(|p| p.entity_id), Some(42));
         assert_eq!(registry.provisional_len(), 1);
+    }
+
+    #[test]
+    fn a_pass_evicts_players_it_no_longer_saw() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.try_register(1, "One".into());
+        registry.try_register(2, "Two".into());
+        registry.update_discipline(2, 20, 21);
+
+        // A pass that saw only player 1: player 2 left the group.
+        registry.retain_players(&[1]);
+
+        assert_eq!(registry.get_slot(1), Some(0));
+        assert!(!registry.is_registered(2));
+
+        // The freed slot takes the next reading, and the evicted player's
+        // discipline survives a return to the group.
+        registry.assign_provisional_slots([(1, "Newcomer".into())]);
+        assert_eq!(registry.get_provisional(1), Some("Newcomer"));
+
+        registry.remove_slot(1);
+        registry.try_register(2, "Two".into());
+        let two = registry.get_player(1).unwrap();
+        assert_eq!((two.class_id, two.discipline_id), (Some(20), Some(21)));
     }
 
     #[test]
