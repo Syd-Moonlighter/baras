@@ -1223,18 +1223,8 @@ impl CombatEncounter {
 
     #[inline]
     fn try_track_entity(&mut self, entity: &Entity, timestamp: NaiveDateTime) {
-        // Do not create entities from zero-health snapshots. For a player we
-        // already know, though, (0/max) is a real reading and should replace the
-        // stale pre-death health used by raid-frame matching.
+        // Dont register zero health entities
         if entity.health.0.is_zero() {
-            if entity.entity_type == EntityType::Player
-                && entity.health.1 > 0
-                && let Some(player) = self.players.get_mut(&entity.log_id)
-            {
-                player.last_seen_at = Some(timestamp);
-                player.current_hp = 0;
-                player.max_hp = entity.health.1;
-            }
             return;
         }
 
