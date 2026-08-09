@@ -120,8 +120,6 @@ async fn process_registry_action(
 }
 
 struct RaidOcrResult {
-    /// Slots holding no frame at all.
-    empty_slots: usize,
     observations: Vec<baras_core::raid_detect::RowObservation>,
     assignments: Vec<baras_core::raid_detect::RowAssignment>,
     decisions: Vec<baras_core::raid_detect::RowDecision>,
@@ -199,46 +197,30 @@ fn raid_row_lines(
         .collect()
 }
 
-/// Tell the user what happend during the raid name detection.
-/// Tell how many names were read and how many of those were confirmed against the log.
-/// List the amount of names available (log roster) only as extra information.
+/// What a pass found, counted in names the text detector actually read —
+/// the only thing matching can ever work with. Frames, slots and occupancy
+/// are pipeline internals and stay out of the message.
+///
+/// No names needs no advice — the user looking at the grid and the frames
+/// can see why on their own.
 fn raid_detection_message(
-    frames: usize,
-    names_read: usize,
-    confirmed: usize,
-    unconfirmed: usize,
-    candidate_count: usize,
+    names: usize,
+    matched: usize,
+    pending: usize,
     ambiguous: usize,
-    unmatched: usize,
-    group_hint: &str,
 ) -> String {
-    // Lookalikes are the one failure reading again cannot fix, so it leads.
+    if names == 0 {
+        return "No names detected".to_string();
+    }
+    let noun = if names == 1 { "name" } else { "names" };
+    let mut message = format!(
+        "{names} {noun} detected. {matched}/{names} matched, {pending}/{names} pending player appearance in logs."
+    );
+    // The one outcome another read cannot fix.
     if ambiguous > 0 {
-        return format!(
-            "{ambiguous} names too alike to tell apart: sort them out in rearrange mode ({confirmed} confirmed)"
-        );
+        message.push_str(" Some names too similar. Manual assignment recommended.");
     }
-
-    // Worth another go, unlike a lookalike.
-    if unmatched > 0 && confirmed == 0 {
-        return format!("{unmatched} names matched no one on the roster: try detecting again");
-    }
-
-    let state = match (confirmed, unconfirmed) {
-        (0, 0) => "no names assigned".to_string(),
-        (confirmed, 0) => format!("{confirmed} confirmed"),
-        (0, unconfirmed) => format!("{unconfirmed} unconfirmed"),
-        (confirmed, unconfirmed) => format!("{confirmed} confirmed, {unconfirmed} unconfirmed"),
-    };
-
-    let roster = if candidate_count == 0 {
-        "no log roster yet".to_string()
-    } else {
-        format!("log roster {candidate_count}")
-    };
-
-    // Frames that were there, not grid slots: a 4-player group reads 4/4.
-    format!("OCR read {names_read}/{frames}{group_hint}: {state} ({roster})")
+    message
 }
 
 async fn detect_raid_names(
@@ -307,7 +289,6 @@ async fn detect_raid_names(
         );
 
         RaidOcrResult {
-            empty_slots: reading.empty_slots(),
             observations: reading.rows,
             assignments,
             decisions,
@@ -327,7 +308,6 @@ async fn detect_raid_names(
     };
 
     let RaidOcrResult {
-        empty_slots,
         observations,
         assignments,
         decisions,
@@ -339,36 +319,17 @@ async fn detect_raid_names(
     let names_read = names.len();
     names.retain(|(row, _)| !assignments.iter().any(|a| a.row == *row as usize));
 
-    let unreadable_slots = slot_count - empty_slots;
-    // Context only, and only when it disagrees.
-    let group_hint = match service_handle.log_group_size().await {
-        Some(size) if size != unreadable_slots => format!(" (log says {size} player)"),
-        _ => String::new(),
-    };
-
     if assignments.is_empty() && names.is_empty() {
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         tracing::info!(
             elapsed_ms,
             candidate_count,
-            empty_slots,
-            unreadable_slots,
-            "Raid name detection could not read any names"
+            "Raid name detection read nothing"
         );
         service_handle.set_ambiguous_slots(Vec::new()).await;
-        // No frame anywhere is not a failure to read: the group is smaller than
-        // the grid, or the grid is somewhere the frames are not.
-        let message = if empty_slots == slot_count {
-            format!("No raid frames found{}: check the grid is over them", group_hint)
-        } else if observations
-            .iter()
-            .any(|o| o.hp_value.is_some() || o.hp_percent.is_some())
-        {
-            "Health read but no names: move the grid up so each name is inside its cell".to_string()
-        } else {
-            format!("No names read from {unreadable_slots} frames: check alignment")
-        };
-        let _ = result_tx.send(message);
+        // An empty pass must not wipe names an earlier pass left waiting, so
+        // the registry is not touched.
+        let _ = result_tx.send(raid_detection_message(0, 0, 0, 0));
         return;
     }
 
@@ -376,22 +337,19 @@ async fn detect_raid_names(
     if matched > 0 {
         let _ = service_handle.apply_raid_detection(assignments).await;
     }
-    let (provisional, registered) = service_handle.apply_provisional_raid_detection(names).await;
-    let retained = registered.saturating_sub(matched);
+    let (pending, _) = service_handle.apply_provisional_raid_detection(names).await;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
 
     tracing::info!(
         elapsed_ms,
         matched,
         names_read,
-        provisional,
-        retained,
+        pending,
         candidate_count,
         "Raid name detection complete"
     );
 
-    // Two or three lookalikes need a human, so mark them for the overlay to
-    // pulse rather than telling the user to read again.
+    // Lookalikes need a human, so mark them for the overlay to pulse.
     let ambiguous: Vec<u8> = decisions
         .iter()
         .filter(|d| d.rejected == Some(baras_core::raid_detect::Rejection::Ambiguous))
@@ -400,21 +358,11 @@ async fn detect_raid_names(
     let ambiguous_count = ambiguous.len();
     service_handle.set_ambiguous_slots(ambiguous).await;
 
-    // Read, but matched nobody. Another read may fix it.
-    let unmatched = decisions
-        .iter()
-        .filter(|d| d.rejected == Some(baras_core::raid_detect::Rejection::NoCandidate))
-        .count();
-
     let _ = result_tx.send(raid_detection_message(
-        slot_count - empty_slots,
         names_read,
         matched,
-        provisional,
-        candidate_count,
+        pending,
         ambiguous_count,
-        unmatched,
-        &group_hint,
     ));
 }
 
@@ -999,76 +947,44 @@ async fn process_overlay_update(
 mod raid_detection_message_tests {
     use super::raid_detection_message;
 
-    /// Args: frames, read, confirmed, unconfirmed, roster, ambiguous, unmatched, hint.
+    /// Args: names, matched, pending, ambiguous.
     #[test]
-    fn reports_the_grid_as_it_now_stands() {
+    fn counts_are_against_names_read() {
         assert_eq!(
-            raid_detection_message(8, 8, 7, 1, 8, 0, 0, ""),
-            "OCR read 8/8: 7 confirmed, 1 unconfirmed (log roster 8)"
-        );
-        assert_eq!(
-            raid_detection_message(8, 8, 8, 0, 8, 0, 0, ""),
-            "OCR read 8/8: 8 confirmed (log roster 8)"
-        );
-        assert_eq!(
-            raid_detection_message(8, 6, 6, 0, 8, 0, 0, ""),
-            "OCR read 6/8: 6 confirmed (log roster 8)"
+            raid_detection_message(7, 3, 4, 0),
+            "7 names detected. 3/7 matched, 4/7 pending player appearance in logs."
         );
     }
 
-    /// Before anyone appears in the log there is nothing to confirm against
     #[test]
-    fn an_empty_roster_is_explained_rather_than_counted() {
+    fn a_full_match_still_reports_both_counts() {
         assert_eq!(
-            raid_detection_message(8, 8, 0, 8, 0, 0, 0, ""),
-            "OCR read 8/8: 8 unconfirmed (no log roster yet)"
+            raid_detection_message(4, 4, 0, 0),
+            "4 names detected. 4/4 matched, 0/4 pending player appearance in logs."
         );
     }
 
-    /// The case that used to read `matched 8/9` and look like a failure: every
-    /// frame resolved, but the log had seen a ninth player.
+    /// The user looking at the grid and the frames can see why on their own.
     #[test]
-    fn a_roster_larger_than_the_frame_count_is_not_a_failure() {
+    fn no_names_is_the_whole_message() {
+        assert_eq!(raid_detection_message(0, 0, 0, 0), "No names detected");
+    }
+
+    /// The one outcome another read cannot fix asks for a human.
+    #[test]
+    fn lookalikes_ask_for_manual_assignment() {
         assert_eq!(
-            raid_detection_message(8, 8, 8, 0, 9, 0, 0, ""),
-            "OCR read 8/8: 8 confirmed (log roster 9)"
+            raid_detection_message(8, 6, 0, 2),
+            "8 names detected. 6/8 matched, 0/8 pending player appearance in logs. \
+             Some names too similar. Manual assignment recommended."
         );
     }
 
-    /// Reading again cannot separate lookalikes, so that case says so instead
-    /// of reporting a count the user would try to improve.
     #[test]
-    fn lookalikes_ask_for_a_human_rather_than_another_read() {
+    fn one_name_reads_singular() {
         assert_eq!(
-            raid_detection_message(8, 8, 6, 2, 8, 2, 0, ""),
-            "2 names too alike to tell apart: sort them out in rearrange mode (6 confirmed)"
-        );
-    }
-
-    /// Unlike lookalikes, a bad read is worth trying again.
-    #[test]
-    fn names_matching_no_one_invite_another_read() {
-        assert_eq!(
-            raid_detection_message(8, 3, 0, 3, 8, 0, 3, ""),
-            "3 names matched no one on the roster: try detecting again"
-        );
-    }
-
-    /// An 8-slot grid in a 4-player flashpoint read every frame there was.
-    #[test]
-    fn empty_slots_are_not_counted_as_frames() {
-        assert_eq!(
-            raid_detection_message(4, 4, 4, 0, 4, 0, 0, ""),
-            "OCR read 4/4: 4 confirmed (log roster 4)"
-        );
-    }
-
-    /// The log's group size is context, never a correction.
-    #[test]
-    fn a_group_size_hint_is_appended_not_enforced() {
-        assert_eq!(
-            raid_detection_message(4, 4, 4, 0, 4, 0, 0, " (log says 8 player)"),
-            "OCR read 4/4 (log says 8 player): 4 confirmed (log roster 4)"
+            raid_detection_message(1, 0, 1, 0),
+            "1 name detected. 0/1 matched, 1/1 pending player appearance in logs."
         );
     }
 }

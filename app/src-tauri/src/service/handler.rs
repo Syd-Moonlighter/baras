@@ -510,23 +510,6 @@ impl ServiceHandle {
         counts
     }
 
-    /// Group size from the log, e.g. `8` from `8 Player Master`.
-    ///
-    /// Context only. Content often reports none, and players stand out of range.
-    pub async fn log_group_size(&self) -> Option<usize> {
-        let session_guard = self.shared.session.read().await;
-        let session = session_guard.as_ref()?;
-        let session = session.read().await;
-        let cache = session.session_cache.as_ref()?;
-        cache
-            .current_area
-            .difficulty_name
-            .split_whitespace()
-            .next()?
-            .parse()
-            .ok()
-    }
-
     /// Mark the slots whose reading fitted more than one player.
     pub async fn set_ambiguous_slots(&self, slots: Vec<u8>) {
         self.shared

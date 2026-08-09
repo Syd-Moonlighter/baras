@@ -94,20 +94,13 @@ pub fn observe_slots_dumping(
     let mut slot_images = Vec::with_capacity(slots.len());
     let mut bars: Vec<Option<BarPosition>> = Vec::with_capacity(slots.len());
 
-    // Kept before reconciliation borrows positions: a bar that was actually
-    // there is half of what says a frame exists.
-    let mut bar_seen: Vec<bool> = Vec::with_capacity(slots.len());
-
     for &(_, x, y, w, h) in slots {
         match image.crop(x, y, w, h) {
             Some(slot_image) => {
-                let bar = detect_health_bar(&slot_image);
-                bar_seen.push(bar.is_some());
-                bars.push(bar);
+                bars.push(detect_health_bar(&slot_image));
                 slot_images.push(Some(slot_image));
             }
             None => {
-                bar_seen.push(false);
                 bars.push(None);
                 slot_images.push(None);
             }
@@ -129,6 +122,11 @@ pub fn observe_slots_dumping(
 
     // Names only: the bars were already reconciled. Positions are compared
     // relative to each slot's bar, so a borrowed bar never acts as an anchor.
+    //
+    // Slots holding no frame are not weeded out here: a dead player's cell is
+    // dimmed until nothing geometric distinguishes it from bare scenery, so
+    // every slot gets its crop and the text detector arbitrates — background
+    // yields a crop with no text and drops out on its own.
     harmonize_names(&mut per_slot_bands, &bars, &inferred);
 
     // Prepare everything first: crops can only overlap once they all exist.
@@ -260,10 +258,11 @@ pub fn observe_slots_dumping(
             }
         }
 
-        // Neither a bar nor any text means no frame, not a failed reading.
+        // Empty is the detector's verdict, not geometry's: no bar of its own
+        // and no text anywhere in its crop.
         let state = if observation.name_text.is_some() {
             SlotState::Read
-        } else if !bar_seen[slot_index] && textless.contains(&slot_index) {
+        } else if inferred[slot_index] && textless.contains(&slot_index) {
             SlotState::Empty
         } else {
             SlotState::Unreadable
@@ -309,9 +308,9 @@ pub struct Reading {
 
 /// What a slot turned out to hold.
 ///
-/// A slot with neither a health bar nor any text is an empty frame, not a
-/// failed reading — telling a user we could not read four names when the group
-/// is four players short is wrong.
+/// A slot with no bar of its own and no text anywhere in its crop is empty,
+/// not a failed reading: telling a user we could not read four names when the
+/// group is four players short is wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotState {
     /// A name was read.
@@ -320,24 +319,6 @@ pub enum SlotState {
     Unreadable,
     /// No frame here.
     Empty,
-}
-
-impl Reading {
-    /// Slots holding no frame at all.
-    pub fn empty_slots(&self) -> usize {
-        self.states
-            .iter()
-            .filter(|(_, s)| *s == SlotState::Empty)
-            .count()
-    }
-
-    /// Slots holding a frame we could not read a name from.
-    pub fn unreadable_slots(&self) -> usize {
-        self.states
-            .iter()
-            .filter(|(_, s)| *s == SlotState::Unreadable)
-            .count()
-    }
 }
 
 /// A health crop prepared but not recognized.

@@ -130,6 +130,11 @@ fn has_run(slot: &CapturedImage, y: u32, search: u32, keep: impl Fn(u8, u8, u8) 
 /// glyph-bright runs — the dark space above the bar never qualifies. Returns
 /// `None` for a slot with no bar to see: dead, empty, or drained out of the
 /// search area.
+///
+/// Red the world paints — a carpet, lava — can pass for a bar; frame styles
+/// vary too much for shape rules to reject it safely. The text detector is
+/// the authority on whether a slot holds anything worth counting: background
+/// behind a false bar simply yields a crop with no name in it.
 pub fn detect_health_bar(slot: &CapturedImage) -> Option<BarPosition> {
     if slot.width == 0 || slot.height < MIN_BAR_HEIGHT {
         return None;
@@ -494,6 +499,38 @@ pub fn slot_bands(slot: &CapturedImage, bar: Option<BarPosition>, inferred: bool
 // Grid consensus
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Median `(height, gap from name bottom to bar top)` of the name bands found
+/// in slots whose bar was actually seen. `None` until enough slots agree for
+/// the numbers to mean anything.
+///
+/// Bottoms, not tops: icons above the text stretch a band upward, never down,
+/// so the bottom is the edge the slots agree on.
+fn name_consensus(
+    per_slot: &[Vec<Band>],
+    bars: &[Option<BarPosition>],
+    inferred: &[bool],
+) -> Option<(u32, u32)> {
+    let found: Vec<(u32, u32)> = per_slot
+        .iter()
+        .zip(bars)
+        .zip(inferred)
+        .filter_map(|((bands, bar), inferred)| {
+            let (bar_top, _) = (*bar).filter(|_| !inferred)?;
+            bands
+                .iter()
+                .find(|b| b.kind == BandKind::Name)
+                .map(|b| (b.height, bar_top.saturating_sub(b.top + b.height)))
+        })
+        .collect();
+
+    (found.len() >= MIN_CONSENSUS_SLOTS).then(|| {
+        (
+            median(found.iter().map(|&(height, _)| height)),
+            median(found.iter().map(|&(_, gap)| gap)),
+        )
+    })
+}
+
 /// Pull name bands that disagree with the grid back to consensus.
 ///
 /// Positions are compared relative to each slot's bar, never to the slot's own
@@ -514,28 +551,9 @@ pub fn harmonize_names(
 ) {
     const KIND: BandKind = BandKind::Name;
 
-    // (height, gap from name bottom to bar top) per seen-bar slot. Bottoms, not
-    // tops: icons above the text stretch a band upward, never down, so the
-    // bottom is the edge the slots agree on.
-    let found: Vec<(u32, u32)> = per_slot
-        .iter()
-        .zip(bars)
-        .zip(inferred)
-        .filter_map(|((bands, bar), inferred)| {
-            let (bar_top, _) = (*bar).filter(|_| !inferred)?;
-            bands
-                .iter()
-                .find(|b| b.kind == KIND)
-                .map(|b| (b.height, bar_top.saturating_sub(b.top + b.height)))
-        })
-        .collect();
-
-    if found.len() < MIN_CONSENSUS_SLOTS {
+    let Some((consensus_height, consensus_gap)) = name_consensus(per_slot, bars, inferred) else {
         return;
-    }
-
-    let consensus_height = median(found.iter().map(|&(height, _)| height));
-    let consensus_gap = median(found.iter().map(|&(_, gap)| gap));
+    };
     // Scales with the frame size.
     let tolerance = (consensus_height * 2 / 5).max(2);
 
@@ -1023,4 +1041,5 @@ mod tests {
             slots[3]
         );
     }
+
 }
