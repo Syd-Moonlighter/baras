@@ -157,12 +157,7 @@ fn raid_row_lines(
             })
             .unwrap_or_default()
         };
-        format!(
-            "name {:.2}{}{}",
-            score.name_score,
-            part("hp", score.hp_value),
-            part("hp%", score.hp_percent)
-        )
+        format!("name {:.2}{}", score.name_score, part("hp", score.hp_value))
     };
 
     decisions

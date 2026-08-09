@@ -1,7 +1,7 @@
 //! Prepare a raid-frame band for recognition.
 //!
 //! Crops are contrast-stretched and scaled to the
-//! recognition model's 32 px input height.
+//! recognition model's 64 px input height.
 
 use fast_image_resize::images::Image;
 use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};

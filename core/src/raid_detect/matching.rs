@@ -15,7 +15,9 @@ pub struct RowObservation {
     pub name_text: Option<String>,
     /// Absolute health, e.g. `271245` read from `271,245`.
     pub hp_value: Option<u32>,
-    /// Health percentage, e.g. `55` read from `(55%)`.
+    /// Health percentage, e.g. `55` read from `(55%)`. Diagnostics only: it is
+    /// 100 for nearly every healthy player, so it separates almost nobody, and
+    /// a dropped digit turns `(100%)` into a confident `10`.
     pub hp_percent: Option<u8>,
 }
 
@@ -38,7 +40,6 @@ pub struct MatchConfig {
     pub min_margin: f32,
     pub name_weight: f32,
     pub hp_value_weight: f32,
-    pub hp_percent_weight: f32,
     /// Weakest name health may still be counted for. `None` bars it entirely.
     pub health_rescue_floor: Option<f32>,
 }
@@ -48,10 +49,9 @@ impl Default for MatchConfig {
         Self {
             min_confidence: MIN_NAME_CONFIDENCE,
             min_margin: 0.10,
-            // Percentages collide often; names and absolute health do not.
+            // Names and absolute health identify a player; see `hp_value_score`.
             name_weight: 1.0,
             hp_value_weight: 0.9,
-            hp_percent_weight: 0.25,
             health_rescue_floor: None,
         }
     }
@@ -132,20 +132,6 @@ fn hp_value_score(observed: u32, candidate: &PlayerCandidate) -> f32 {
     best
 }
 
-/// Score a percentage reading, tolerating rounding either side of the boundary.
-fn hp_percent_score(observed: u8, candidate: &PlayerCandidate) -> f32 {
-    let Some(actual) = candidate.hp_percent() else {
-        return 0.0;
-    };
-    match observed.abs_diff(actual) {
-        0 => 1.0,
-        1 => 0.8,
-        2 => 0.5,
-        3 => 0.25,
-        _ => 0.0,
-    }
-}
-
 /// One health signal's contribution to a score.
 #[derive(Debug, Clone, Copy)]
 pub struct Contribution {
@@ -165,8 +151,6 @@ pub struct CandidateScore {
     /// Present when the row carried an absolute health reading and the
     /// candidate had health to compare it against.
     pub hp_value: Option<Contribution>,
-    /// Present when the row carried a percentage and the candidate had one.
-    pub hp_percent: Option<Contribution>,
 }
 
 /// Combined score for one row against one candidate, in `0.0..=1.0`,
@@ -183,7 +167,6 @@ fn score_parts(
         total: 0.0,
         name_score: 0.0,
         hp_value: None,
-        hp_percent: None,
     };
 
     let Some(name) = normalized_name else {
@@ -219,17 +202,6 @@ fn score_parts(
             total_weight += config.hp_value_weight;
         }
         parts.hp_value = Some(Contribution { score: s, counted });
-    }
-    if let Some(pct) = observation.hp_percent
-        && candidate.hp_percent().is_some()
-    {
-        let s = hp_percent_score(pct, candidate);
-        let counted = s >= STRONG_HEALTH && config.hp_percent_weight > 0.0;
-        if counted {
-            weighted += s * config.hp_percent_weight;
-            total_weight += config.hp_percent_weight;
-        }
-        parts.hp_percent = Some(Contribution { score: s, counted });
     }
 
     // Supporting evidence may improve a name score, but must never reduce it.
