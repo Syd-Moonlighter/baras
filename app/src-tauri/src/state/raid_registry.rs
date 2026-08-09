@@ -35,24 +35,36 @@ fn name_match(read: &str, log_name: &str) -> Option<f32> {
         .filter(|score| *score >= baras_core::raid_detect::MIN_NAME_CONFIDENCE)
 }
 
+/// What one raid-frame slot holds.
+#[derive(Debug, Clone)]
+enum SlotOccupant {
+    /// A player with a log identity.
+    Player(RegisteredPlayer),
+    /// A name read before a combat-log roster could claim it.
+    Provisional {
+        name: String,
+        /// Detection passes this name has survived unclaimed.
+        passes_unclaimed: u8,
+    },
+}
+
+/// One slot: its occupant and its per-slot flags, moved as a unit so a swap or
+/// clear can never leave an attribute behind.
+#[derive(Debug, Clone, Default)]
+struct SlotEntry {
+    occupant: Option<SlotOccupant>,
+    /// Last reading fitted two or more players equally well (display-only).
+    ambiguous: bool,
+}
+
 /// Tracks persistent player-to-slot assignments for raid frames.
 ///
 /// Players are added when they receive an effect from the local player.
 /// Players stay in their assigned slot until explicitly removed by user action.
 #[derive(Debug, Default)]
 pub struct RaidSlotRegistry {
-    /// Maps slot (0-15) → registered player info
-    slots: HashMap<u8, RegisteredPlayer>,
-    /// Names read before a combat-log roster is available.
-    provisional_slots: HashMap<u8, String>,
-    /// Per slot: last provisional name, and passes survived unclaimed.
-    provisional_age: HashMap<u8, (String, u8)>,
-    /// Slots whose reading fitted two or more players equally well.
-    ambiguous_slots: HashSet<u8>,
-    /// Reverse lookup: entity_id → slot
-    entity_to_slot: HashMap<i64, u8>,
-    /// Maximum number of slots (configurable, default 8)
-    max_slots: u8,
+    /// One entry per slot; the length is the configured maximum.
+    slots: Vec<SlotEntry>,
     /// Pending discipline info for entities not yet registered
     /// (DisciplineChanged often fires before player is registered)
     /// Maps entity_id -> (class_id, discipline_id)
@@ -62,12 +74,7 @@ pub struct RaidSlotRegistry {
 impl RaidSlotRegistry {
     pub fn new(max_slots: u8) -> Self {
         Self {
-            slots: HashMap::new(),
-            provisional_slots: HashMap::new(),
-            provisional_age: HashMap::new(),
-            ambiguous_slots: HashSet::new(),
-            entity_to_slot: HashMap::new(),
-            max_slots,
+            slots: vec![SlotEntry::default(); max_slots as usize],
             pending_disciplines: HashMap::new(),
         }
     }
@@ -78,148 +85,157 @@ impl RaidSlotRegistry {
     /// Any pending discipline info is automatically applied upon registration.
     pub fn try_register(&mut self, entity_id: i64, name: String) -> Option<u8> {
         // Already registered - reject
-        if self.entity_to_slot.contains_key(&entity_id) {
+        if self.slot_of(entity_id).is_some() {
             return None;
         }
 
         let normalized = baras_core::raid_detect::normalize(&name);
         let provisional_slot = self
-            .provisional_slots
-            .iter()
-            .filter_map(|(&slot, provisional)| {
+            .provisionals()
+            .filter_map(|(slot, provisional, _)| {
                 let read = baras_core::raid_detect::normalize(provisional);
                 Some((slot, name_match(&read, &normalized)?))
             })
             .max_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(slot, _)| slot);
-        let slot = provisional_slot.or_else(|| self.find_first_available_slot())?;
-        self.provisional_slots.remove(&slot);
-        // A real player settles whatever the reading could not.
-        self.ambiguous_slots.remove(&slot);
-        let mut player = RegisteredPlayer::new(entity_id, name);
+        let slot = provisional_slot.or_else(|| self.first_free_slot())?;
 
+        let mut player = RegisteredPlayer::new(entity_id, name);
         // Check for pending discipline info (DisciplineChanged often fires before registration)
         if let Some((class_id, discipline_id)) = self.pending_disciplines.remove(&entity_id) {
             player.class_id = Some(class_id);
             player.discipline_id = Some(discipline_id);
         }
 
-        self.slots.insert(slot, player);
-        self.entity_to_slot.insert(entity_id, slot);
+        let entry = &mut self.slots[slot as usize];
+        entry.occupant = Some(SlotOccupant::Player(player));
+        // A real player settles whatever the reading could not.
+        entry.ambiguous = false;
         Some(slot)
     }
 
     /// Update player's class/discipline from DisciplineChanged event.
     /// If the player isn't registered yet, stores both class and discipline for later application.
     pub fn update_discipline(&mut self, entity_id: i64, class_id: i64, discipline_id: i64) {
-        if let Some(&slot) = self.entity_to_slot.get(&entity_id) {
-            // Player is registered - update directly
-            if let Some(player) = self.slots.get_mut(&slot) {
+        match self.player_mut(entity_id) {
+            Some(player) => {
                 player.class_id = Some(class_id);
                 player.discipline_id = Some(discipline_id);
             }
-        } else {
-            // Player not registered yet - store both class_id and discipline_id for later
-            self.pending_disciplines
-                .insert(entity_id, (class_id, discipline_id));
+            None => {
+                self.pending_disciplines
+                    .insert(entity_id, (class_id, discipline_id));
+            }
         }
-    }
-
-    /// Update player's name (if we get better info later)
-    pub fn update_name(&mut self, entity_id: i64, name: String) {
-        if let Some(&slot) = self.entity_to_slot.get(&entity_id)
-            && let Some(player) = self.slots.get_mut(&slot)
-        {
-            player.name = name;
-        }
-    }
-
-    /// Find the first available slot (lowest numbered empty slot)
-    fn find_first_available_slot(&self) -> Option<u8> {
-        (0..self.max_slots).find(|&slot| {
-            !self.slots.contains_key(&slot) && !self.provisional_slots.contains_key(&slot)
-        })
     }
 
     /// Update OCR-only slots without touching log-backed players.
+    ///
+    /// Also the aging step: a provisional that keeps coming back unclaimed is a
+    /// misread matching nobody, and would otherwise hold its slot for the
+    /// session and keep the real player out. A new reading restarts the count.
     pub fn assign_provisional_slots(
         &mut self,
         assignments: impl IntoIterator<Item = (u8, String)>,
     ) {
-        self.provisional_slots.clear();
+        // Prior provisionals, so an unchanged name carries its pass count over.
+        let prior: Vec<Option<(String, u8)>> = self
+            .slots
+            .iter_mut()
+            .map(|entry| match entry.occupant.take() {
+                Some(SlotOccupant::Provisional {
+                    name,
+                    passes_unclaimed,
+                }) => Some((baras_core::raid_detect::normalize(&name), passes_unclaimed)),
+                keep => {
+                    entry.occupant = keep;
+                    None
+                }
+            })
+            .collect();
+
         let mut seen_slots = HashSet::new();
         let mut seen_names = HashSet::new();
         let registered: Vec<_> = self
-            .slots
-            .values()
-            .map(|player| baras_core::raid_detect::normalize(&player.name))
+            .players()
+            .map(|(_, player)| baras_core::raid_detect::normalize(&player.name))
             .collect();
 
         for (slot, name) in assignments {
             let name = name.trim();
             let normalized = baras_core::raid_detect::normalize(name);
-            if slot >= self.max_slots
-                || self.slots.contains_key(&slot)
+            if slot as usize >= self.slots.len()
+                || matches!(
+                    self.slots[slot as usize].occupant,
+                    Some(SlotOccupant::Player(_))
+                )
                 || normalized.len() < baras_core::raid_detect::MIN_OCR_NAME_CHARS
                 || registered
                     .iter()
                     .any(|log| name_match(&normalized, log).is_some())
                 || !seen_slots.insert(slot)
-                || !seen_names.insert(normalized)
             {
                 continue;
             }
-            self.provisional_slots.insert(slot, name.to_string());
-        }
-
-        // This pass is what proves a name unclaimable.
-        for (slot, name) in self.age_provisional_slots() {
-            // The name says what OCR keeps misreading.
-            tracing::info!(
-                slot,
-                name = %name,
-                passes = PROVISIONAL_MAX_PASSES,
-                "Dropped provisional name never claimed by a player"
-            );
+            let passes_unclaimed = match &prior[slot as usize] {
+                Some((last, passes)) if *last == normalized => passes + 1,
+                Some(_) => 0,
+                None => 1,
+            };
+            if !seen_names.insert(normalized) {
+                continue;
+            }
+            if passes_unclaimed > PROVISIONAL_MAX_PASSES {
+                // This pass is what proves a name unclaimable; the name says
+                // what OCR keeps misreading.
+                tracing::info!(
+                    slot,
+                    name = %name,
+                    passes = PROVISIONAL_MAX_PASSES,
+                    "Dropped provisional name never claimed by a player"
+                );
+                continue;
+            }
+            self.slots[slot as usize].occupant = Some(SlotOccupant::Provisional {
+                name: name.to_string(),
+                passes_unclaimed,
+            });
         }
     }
 
     /// Apply a detection batch without losing metadata during swaps.
-    pub fn assign_slots(
-        &mut self,
-        assignments: impl IntoIterator<Item = (u8, i64, String)>,
-    ) {
+    pub fn assign_slots(&mut self, assignments: impl IntoIterator<Item = (u8, i64, String)>) {
         let mut seen_slots = HashSet::new();
         let mut seen_entities = HashSet::new();
         let assignments: Vec<_> = assignments
             .into_iter()
             .filter(|(slot, entity_id, _)| {
-                *slot < self.max_slots
+                (*slot as usize) < self.slots.len()
                     && seen_slots.insert(*slot)
                     && seen_entities.insert(*entity_id)
             })
             .collect();
 
+        // Pull assigned players out of their old slots, keeping their metadata.
         let mut players = HashMap::new();
         for (_, entity_id, _) in &assignments {
-            let Some(old_slot) = self.entity_to_slot.remove(entity_id) else {
-                continue;
-            };
-            if let Some(player) = self.slots.remove(&old_slot) {
+            if let Some(slot) = self.slot_of(*entity_id)
+                && let Some(SlotOccupant::Player(player)) =
+                    self.slots[slot as usize].occupant.take()
+            {
                 players.insert(*entity_id, player);
             }
         }
 
+        // Vacate the target slots; a displaced player keeps its discipline.
         for (slot, _, _) in &assignments {
-            self.provisional_slots.remove(slot);
-            if let Some(displaced) = self.slots.remove(slot) {
-                self.entity_to_slot.remove(&displaced.entity_id);
-                if let (Some(class_id), Some(discipline_id)) =
+            if let Some(SlotOccupant::Player(displaced)) =
+                self.slots[*slot as usize].occupant.take()
+                && let (Some(class_id), Some(discipline_id)) =
                     (displaced.class_id, displaced.discipline_id)
-                {
-                    self.pending_disciplines
-                        .insert(displaced.entity_id, (class_id, discipline_id));
-                }
+            {
+                self.pending_disciplines
+                    .insert(displaced.entity_id, (class_id, discipline_id));
             }
         }
 
@@ -237,202 +253,198 @@ impl RaidSlotRegistry {
                 player.discipline_id = Some(discipline_id);
             }
 
-            self.slots.insert(slot, player);
-            self.entity_to_slot.insert(entity_id, slot);
+            self.slots[slot as usize].occupant = Some(SlotOccupant::Player(player));
         }
     }
 
     /// Swap two slots (user-initiated rearrange)
     pub fn swap_slots(&mut self, slot_a: u8, slot_b: u8) {
-        let player_a = self.slots.remove(&slot_a);
-        let player_b = self.slots.remove(&slot_b);
-        let provisional_a = self.provisional_slots.remove(&slot_a);
-        let provisional_b = self.provisional_slots.remove(&slot_b);
-
-        if let Some(p) = player_a {
-            self.entity_to_slot.insert(p.entity_id, slot_b);
-            self.slots.insert(slot_b, p);
-        }
-        if let Some(p) = player_b {
-            self.entity_to_slot.insert(p.entity_id, slot_a);
-            self.slots.insert(slot_a, p);
-        }
-        if let Some(name) = provisional_a {
-            self.provisional_slots.insert(slot_b, name);
-        }
-        if let Some(name) = provisional_b {
-            self.provisional_slots.insert(slot_a, name);
+        let (a, b) = (slot_a as usize, slot_b as usize);
+        if a < self.slots.len() && b < self.slots.len() {
+            self.slots.swap(a, b);
         }
     }
 
     /// Remove player from a specific slot (user-initiated delete)
     pub fn remove_slot(&mut self, slot: u8) {
-        self.provisional_slots.remove(&slot);
-        if let Some(player) = self.slots.remove(&slot) {
-            self.entity_to_slot.remove(&player.entity_id);
+        if let Some(entry) = self.slots.get_mut(slot as usize) {
+            *entry = SlotEntry::default();
         }
     }
 
     /// Get the slot for an entity (if registered)
     pub fn get_slot(&self, entity_id: i64) -> Option<u8> {
-        self.entity_to_slot.get(&entity_id).copied()
+        self.slot_of(entity_id)
     }
 
     /// Get the player in a specific slot
     pub fn get_player(&self, slot: u8) -> Option<&RegisteredPlayer> {
-        self.slots.get(&slot)
+        match self.slots.get(slot as usize)?.occupant.as_ref()? {
+            SlotOccupant::Player(player) => Some(player),
+            SlotOccupant::Provisional { .. } => None,
+        }
     }
 
     pub fn get_provisional(&self, slot: u8) -> Option<&str> {
-        self.provisional_slots.get(&slot).map(String::as_str)
+        match self.slots.get(slot as usize)?.occupant.as_ref()? {
+            SlotOccupant::Provisional { name, .. } => Some(name),
+            SlotOccupant::Player(_) => None,
+        }
     }
 
     pub fn has_provisional(&self) -> bool {
-        !self.provisional_slots.is_empty()
+        self.provisionals().next().is_some()
     }
 
-    /// Every OCR-only slot, for matching against the log roster.
+    /// Every OCR-only slot in slot order, for matching against the log roster.
     pub fn provisional_entries(&self) -> Vec<(u8, String)> {
-        let mut entries: Vec<(u8, String)> = self
-            .provisional_slots
-            .iter()
-            .map(|(&slot, name)| (slot, name.clone()))
-            .collect();
-        entries.sort_by_key(|(slot, _)| *slot);
-        entries
+        self.provisionals()
+            .map(|(slot, name, _)| (slot, name.to_string()))
+            .collect()
     }
 
     pub fn provisional_len(&self) -> usize {
-        self.provisional_slots.len()
+        self.provisionals().count()
     }
 
     /// Mark the slots a reading could not choose a player for.
     pub fn set_ambiguous_slots(&mut self, slots: impl IntoIterator<Item = u8>) {
-        self.ambiguous_slots = slots.into_iter().collect();
+        for entry in &mut self.slots {
+            entry.ambiguous = false;
+        }
+        for slot in slots {
+            if let Some(entry) = self.slots.get_mut(slot as usize) {
+                entry.ambiguous = true;
+            }
+        }
     }
 
     pub fn is_ambiguous(&self, slot: u8) -> bool {
-        self.ambiguous_slots.contains(&slot)
-    }
-
-    /// Drop provisional names that keep coming back unclaimed.
-    ///
-    /// A misread matching nobody would otherwise hold its slot for the session
-    /// and keep the real player out. A new reading restarts the count.
-    fn age_provisional_slots(&mut self) -> Vec<(u8, String)> {
-        let age = &mut self.provisional_age;
-        let mut dropped = Vec::new();
-
-        self.provisional_slots.retain(|slot, name| {
-            let normalized = baras_core::raid_detect::normalize(name);
-            let entry = age
-                .entry(*slot)
-                .or_insert_with(|| (normalized.clone(), 0));
-            if entry.0 == normalized {
-                entry.1 += 1;
-            } else {
-                *entry = (normalized, 0);
-            }
-            let keep = entry.1 <= PROVISIONAL_MAX_PASSES;
-            if !keep {
-                dropped.push((*slot, name.clone()));
-            }
-            keep
-        });
-
-        age.retain(|slot, _| self.provisional_slots.contains_key(slot));
-        dropped
+        self.slots
+            .get(slot as usize)
+            .is_some_and(|entry| entry.ambiguous)
     }
 
     pub fn registered_len(&self) -> usize {
-        self.slots.len()
+        self.players().count()
     }
 
     /// Check if a player is registered
     pub fn is_registered(&self, entity_id: i64) -> bool {
-        self.entity_to_slot.contains_key(&entity_id)
+        self.slot_of(entity_id).is_some()
     }
 
     /// Clear all assignments (new session/encounter)
     pub fn clear(&mut self) {
-        self.slots.clear();
-        self.provisional_slots.clear();
-        self.entity_to_slot.clear();
+        self.slots.fill(SlotEntry::default());
         self.pending_disciplines.clear();
-    }
-
-    /// Iterate over all registered players with their slots
-    pub fn iter(&self) -> impl Iterator<Item = (u8, &RegisteredPlayer)> {
-        self.slots.iter().map(|(&slot, player)| (slot, player))
-    }
-
-    /// Number of registered players
-    pub fn len(&self) -> usize {
-        self.slots.len() + self.provisional_slots.len()
     }
 
     /// Check if registry is empty
     pub fn is_empty(&self) -> bool {
-        self.slots.is_empty() && self.provisional_slots.is_empty()
+        self.slots.iter().all(|entry| entry.occupant.is_none())
     }
 
     /// Maximum slots configured
     pub fn max_slots(&self) -> u8 {
-        self.max_slots
+        self.slots.len() as u8
     }
 
     /// Update max slots and compact players if grid shrinks.
     /// Players in slots >= new_max are moved to available lower slots.
     /// Returns the number of players that couldn't fit and were removed.
     pub fn set_max_slots(&mut self, new_max: u8) -> usize {
-        if new_max >= self.max_slots {
-            self.max_slots = new_max;
+        if new_max as usize >= self.slots.len() {
+            self.slots.resize(new_max as usize, SlotEntry::default());
             return 0;
         }
 
-        let mut displaced: Vec<RegisteredPlayer> = Vec::new();
-        let mut provisional: Vec<_> = self.provisional_slots.drain().collect();
-        provisional.sort_by_key(|(slot, _)| *slot);
-        let mut slots_to_remove = Vec::new();
-
-        for &slot in self.slots.keys() {
-            if slot >= new_max {
-                slots_to_remove.push(slot);
-            }
-        }
-
-        for slot in slots_to_remove {
-            if let Some(player) = self.slots.remove(&slot) {
-                self.entity_to_slot.remove(&player.entity_id);
-                displaced.push(player);
-            }
-        }
-        self.max_slots = new_max;
+        // Provisionals re-place after players, so players take priority.
+        let provisional: Vec<(u8, SlotOccupant)> = self
+            .slots
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(slot, entry)| match entry.occupant {
+                Some(SlotOccupant::Provisional { .. }) => {
+                    Some((slot as u8, entry.occupant.take().unwrap()))
+                }
+                _ => None,
+            })
+            .collect();
+        let displaced: Vec<SlotOccupant> = self
+            .slots
+            .drain(new_max as usize..)
+            .filter_map(|entry| entry.occupant)
+            .collect();
 
         let mut removed_count = 0;
-        for player in displaced {
-            if let Some(new_slot) = self.find_first_available_slot() {
-                let entity_id = player.entity_id;
-                self.slots.insert(new_slot, player);
-                self.entity_to_slot.insert(entity_id, new_slot);
-            } else {
-                removed_count += 1;
+        for occupant in displaced {
+            match self.first_free_slot() {
+                Some(slot) => self.slots[slot as usize].occupant = Some(occupant),
+                None => removed_count += 1,
             }
         }
-        for (old_slot, name) in provisional {
-            let slot = (old_slot < new_max
-                && !self.slots.contains_key(&old_slot)
-                && !self.provisional_slots.contains_key(&old_slot))
-                .then_some(old_slot)
-                .or_else(|| self.find_first_available_slot());
-            if let Some(slot) = slot {
-                self.provisional_slots.insert(slot, name);
-            } else {
-                removed_count += 1;
+        for (old_slot, occupant) in provisional {
+            let slot = ((old_slot as usize) < self.slots.len()
+                && self.slots[old_slot as usize].occupant.is_none())
+            .then_some(old_slot)
+            .or_else(|| self.first_free_slot());
+            match slot {
+                Some(slot) => self.slots[slot as usize].occupant = Some(occupant),
+                None => removed_count += 1,
             }
         }
 
         removed_count
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Internal views
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Lowest empty slot.
+    fn first_free_slot(&self) -> Option<u8> {
+        self.slots
+            .iter()
+            .position(|entry| entry.occupant.is_none())
+            .map(|slot| slot as u8)
+    }
+
+    /// Slot holding this entity, if registered. Linear scan: at most 16 slots.
+    fn slot_of(&self, entity_id: i64) -> Option<u8> {
+        self.players()
+            .find(|(_, player)| player.entity_id == entity_id)
+            .map(|(slot, _)| slot)
+    }
+
+    fn player_mut(&mut self, entity_id: i64) -> Option<&mut RegisteredPlayer> {
+        self.slots.iter_mut().find_map(|entry| match &mut entry.occupant {
+            Some(SlotOccupant::Player(player)) if player.entity_id == entity_id => Some(player),
+            _ => None,
+        })
+    }
+
+    fn players(&self) -> impl Iterator<Item = (u8, &RegisteredPlayer)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| match &entry.occupant {
+                Some(SlotOccupant::Player(player)) => Some((slot as u8, player)),
+                _ => None,
+            })
+    }
+
+    fn provisionals(&self) -> impl Iterator<Item = (u8, &str, u8)> {
+        self.slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, entry)| match &entry.occupant {
+                Some(SlotOccupant::Provisional {
+                    name,
+                    passes_unclaimed,
+                }) => Some((slot as u8, name.as_str(), *passes_unclaimed)),
+                _ => None,
+            })
     }
 }
 
@@ -552,5 +564,64 @@ mod tests {
         assert_eq!(registry.set_max_slots(2), 1);
         assert_eq!(registry.get_player(0).map(|p| p.entity_id), Some(42));
         assert_eq!(registry.provisional_len(), 1);
+    }
+
+    #[test]
+    fn an_unclaimed_name_is_dropped_after_max_passes() {
+        let mut registry = RaidSlotRegistry::new(4);
+        for _ in 0..PROVISIONAL_MAX_PASSES {
+            registry.assign_provisional_slots([(0, "Ghost".into())]);
+        }
+        assert_eq!(registry.get_provisional(0), Some("Ghost"));
+
+        registry.assign_provisional_slots([(0, "Ghost".into())]);
+        assert_eq!(registry.get_provisional(0), None);
+    }
+
+    #[test]
+    fn a_new_reading_restarts_the_unclaimed_count() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(0, "Ghost".into())]);
+        registry.assign_provisional_slots([(0, "Ghost".into())]);
+        registry.assign_provisional_slots([(0, "Rider".into())]);
+
+        // The rename reset the count, so Rider gets its own full run.
+        for _ in 0..PROVISIONAL_MAX_PASSES {
+            registry.assign_provisional_slots([(0, "Rider".into())]);
+            assert_eq!(registry.get_provisional(0), Some("Rider"));
+        }
+        registry.assign_provisional_slots([(0, "Rider".into())]);
+        assert_eq!(registry.get_provisional(0), None);
+    }
+
+    #[test]
+    fn clear_resets_ambiguity_and_aging() {
+        let mut registry = RaidSlotRegistry::new(4);
+        for _ in 0..PROVISIONAL_MAX_PASSES {
+            registry.assign_provisional_slots([(0, "Ghost".into())]);
+        }
+        registry.set_ambiguous_slots([0]);
+
+        registry.clear();
+        assert!(!registry.is_ambiguous(0));
+
+        // A fresh session's reading gets its full run, not the old count.
+        for _ in 0..PROVISIONAL_MAX_PASSES {
+            registry.assign_provisional_slots([(0, "Ghost".into())]);
+            assert_eq!(registry.get_provisional(0), Some("Ghost"));
+        }
+    }
+
+    #[test]
+    fn swap_moves_ambiguity_with_the_slot() {
+        let mut registry = RaidSlotRegistry::new(4);
+        registry.assign_provisional_slots([(0, "Alpha".into())]);
+        registry.set_ambiguous_slots([0]);
+
+        registry.swap_slots(0, 1);
+
+        assert_eq!(registry.get_provisional(1), Some("Alpha"));
+        assert!(registry.is_ambiguous(1));
+        assert!(!registry.is_ambiguous(0));
     }
 }
