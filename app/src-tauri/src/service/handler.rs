@@ -22,15 +22,12 @@ use tauri::{AppHandle, Emitter};
 use super::{AreaVisitInfo, CombatData, LogFileInfo, ServiceCommand, SessionInfo};
 use crate::state::SharedState;
 
-const MAX_OCR_ROSTER_AGE_MINUTES: i64 = 12 * 60;
-
 /// How far back in log time a player may have been seen and still be offered to
 /// the matcher.
 ///
-/// Everyone seen since the area was entered is too loose — a raid night in one
-/// instance keeps players who left hours ago, and each one is a chance for a row
-/// to match the wrong name. Measured against the newest log event rather than
-/// the wall clock, so it behaves the same when the log lags.
+/// Log time against log time — freshness never consults the wall clock. Ten
+/// minutes keeps a group member who is merely idle and drops one who left a
+/// while ago; each stale name is a chance for a row to match the wrong player.
 const OCR_ROSTER_WINDOW_MINUTES: i64 = 10;
 
 /// Current-area roster for OCR. Names identify and health only supports.
@@ -41,7 +38,9 @@ pub(crate) async fn raid_detection_candidates(
 ) -> Vec<baras_core::raid_detect::PlayerCandidate> {
     use baras_core::raid_detect::CandidateSet;
 
-    if !shared.is_live_tailing.load(Ordering::SeqCst) {
+    // Names only matter on a live session: a historical file, a closed game,
+    // or a rotated log all mean there is nothing current to match against.
+    if shared.is_session_not_live().await {
         return Vec::new();
     }
     let session_guard = shared.session.read().await;
@@ -52,39 +51,16 @@ pub(crate) async fn raid_detection_candidates(
     let Some(cache) = session.session_cache.as_ref() else {
         return Vec::new();
     };
-
-    // The file we tail carries its own clock. 
-    // The directory index reads a last event only while indexing,
-    // which never happens again after tailing it.
-    let last_event = session.last_event_time;
-    if !roster_is_recent(last_event, chrono::Local::now().naive_local()) {
-        return Vec::new();
-    }
-    let Some(last_event) = last_event else {
+    let Some(last_event) = session.last_event_time else {
         return Vec::new();
     };
 
+    let cutoff = last_event - chrono::Duration::minutes(OCR_ROSTER_WINDOW_MINUTES);
     let mut set = CandidateSet::new();
-    let area_started = cache.current_area.entered_at;
     for player in cache.player_disciplines.values() {
-        let Some(last_seen) = player.last_seen_at else {
-            continue;
-        };
-        if area_started.is_some_and(|started| last_seen < started) {
-            continue;
-        }
-        set.observe_raw(
-            player.id,
-            baras_core::context::resolve(player.name),
-            (player.current_hp, player.max_hp),
-            last_seen,
-        );
-    }
-    if let Some(encounter) = cache.current_encounter() {
-        for player in encounter.players.values() {
-            let Some(last_seen) = player.last_seen_at else {
-                continue;
-            };
+        if let Some(last_seen) = player.last_seen_at
+            && last_seen >= cutoff
+        {
             set.observe_raw(
                 player.id,
                 baras_core::context::resolve(player.name),
@@ -93,40 +69,7 @@ pub(crate) async fn raid_detection_candidates(
             );
         }
     }
-
-    set.expire_before(last_event - chrono::Duration::minutes(OCR_ROSTER_WINDOW_MINUTES));
     set.candidates()
-}
-
-fn roster_is_recent(last_event: Option<chrono::NaiveDateTime>, now: chrono::NaiveDateTime) -> bool {
-    let Some(last_event) = last_event else {
-        return false;
-    };
-    let age = now.signed_duration_since(last_event).num_minutes();
-    (-5..=MAX_OCR_ROSTER_AGE_MINUTES).contains(&age)
-}
-
-#[cfg(test)]
-mod raid_detection_tests {
-    use super::*;
-
-    #[test]
-    fn old_or_missing_logs_do_not_supply_ocr_candidates() {
-        let now = chrono::NaiveDate::from_ymd_opt(2026, 8, 5)
-            .unwrap()
-            .and_hms_opt(10, 0, 0)
-            .unwrap();
-
-        assert!(!roster_is_recent(None, now));
-        assert!(roster_is_recent(
-            Some(now - chrono::Duration::minutes(30)),
-            now
-        ));
-        assert!(!roster_is_recent(
-            Some(now - chrono::Duration::hours(13)),
-            now
-        ));
-    }
 }
 
 /// Handle to communicate with the combat service and query state
