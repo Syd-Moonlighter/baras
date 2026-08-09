@@ -5,10 +5,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// Detection passes a provisional may survive unclaimed. Passes, not fights:
-/// only a reading that saw it again proves it wrong.
-const PROVISIONAL_MAX_PASSES: u8 = 3;
-
 /// Information about a player registered in the raid frame
 #[derive(Debug, Clone)]
 pub struct RegisteredPlayer {
@@ -40,12 +36,9 @@ fn name_match(read: &str, log_name: &str) -> Option<f32> {
 enum SlotOccupant {
     /// A player with a log identity.
     Player(RegisteredPlayer),
-    /// A name read before a combat-log roster could claim it.
-    Provisional {
-        name: String,
-        /// Detection passes this name has survived unclaimed.
-        passes_unclaimed: u8,
-    },
+    /// A name read before a combat-log roster could claim it. It holds the
+    /// slot until a player claims it or the next reading replaces it.
+    Provisional { name: String },
 }
 
 /// One slot: its occupant and its per-slot flags, moved as a unit so a swap or
@@ -92,7 +85,7 @@ impl RaidSlotRegistry {
         let normalized = baras_core::raid_detect::normalize(&name);
         let provisional_slot = self
             .provisionals()
-            .filter_map(|(slot, provisional, _)| {
+            .filter_map(|(slot, provisional)| {
                 let read = baras_core::raid_detect::normalize(provisional);
                 Some((slot, name_match(&read, &normalized)?))
             })
@@ -131,28 +124,17 @@ impl RaidSlotRegistry {
 
     /// Update OCR-only slots without touching log-backed players.
     ///
-    /// Also the aging step: a provisional that keeps coming back unclaimed is a
-    /// misread matching nobody, and would otherwise hold its slot for the
-    /// session and keep the real player out. A new reading restarts the count.
+    /// A new reading replaces the old provisional set wholesale: a name that
+    /// stopped appearing was a misread, or its player left.
     pub fn assign_provisional_slots(
         &mut self,
         assignments: impl IntoIterator<Item = (u8, String)>,
     ) {
-        // Prior provisionals, so an unchanged name carries its pass count over.
-        let prior: Vec<Option<(String, u8)>> = self
-            .slots
-            .iter_mut()
-            .map(|entry| match entry.occupant.take() {
-                Some(SlotOccupant::Provisional {
-                    name,
-                    passes_unclaimed,
-                }) => Some((baras_core::raid_detect::normalize(&name), passes_unclaimed)),
-                keep => {
-                    entry.occupant = keep;
-                    None
-                }
-            })
-            .collect();
+        for entry in &mut self.slots {
+            if matches!(entry.occupant, Some(SlotOccupant::Provisional { .. })) {
+                entry.occupant = None;
+            }
+        }
 
         let mut seen_slots = HashSet::new();
         let mut seen_names = HashSet::new();
@@ -174,31 +156,12 @@ impl RaidSlotRegistry {
                     .iter()
                     .any(|log| name_match(&normalized, log).is_some())
                 || !seen_slots.insert(slot)
+                || !seen_names.insert(normalized)
             {
-                continue;
-            }
-            let passes_unclaimed = match &prior[slot as usize] {
-                Some((last, passes)) if *last == normalized => passes + 1,
-                Some(_) => 0,
-                None => 1,
-            };
-            if !seen_names.insert(normalized) {
-                continue;
-            }
-            if passes_unclaimed > PROVISIONAL_MAX_PASSES {
-                // This pass is what proves a name unclaimable; the name says
-                // what OCR keeps misreading.
-                tracing::info!(
-                    slot,
-                    name = %name,
-                    passes = PROVISIONAL_MAX_PASSES,
-                    "Dropped provisional name never claimed by a player"
-                );
                 continue;
             }
             self.slots[slot as usize].occupant = Some(SlotOccupant::Provisional {
                 name: name.to_string(),
-                passes_unclaimed,
             });
         }
     }
@@ -287,19 +250,15 @@ impl RaidSlotRegistry {
 
     pub fn get_provisional(&self, slot: u8) -> Option<&str> {
         match self.slots.get(slot as usize)?.occupant.as_ref()? {
-            SlotOccupant::Provisional { name, .. } => Some(name),
+            SlotOccupant::Provisional { name } => Some(name),
             SlotOccupant::Player(_) => None,
         }
-    }
-
-    pub fn has_provisional(&self) -> bool {
-        self.provisionals().next().is_some()
     }
 
     /// Every OCR-only slot in slot order, for matching against the log roster.
     pub fn provisional_entries(&self) -> Vec<(u8, String)> {
         self.provisionals()
-            .map(|(slot, name, _)| (slot, name.to_string()))
+            .map(|(slot, name)| (slot, name.to_string()))
             .collect()
     }
 
@@ -434,15 +393,12 @@ impl RaidSlotRegistry {
             })
     }
 
-    fn provisionals(&self) -> impl Iterator<Item = (u8, &str, u8)> {
+    fn provisionals(&self) -> impl Iterator<Item = (u8, &str)> {
         self.slots
             .iter()
             .enumerate()
             .filter_map(|(slot, entry)| match &entry.occupant {
-                Some(SlotOccupant::Provisional {
-                    name,
-                    passes_unclaimed,
-                }) => Some((slot as u8, name.as_str(), *passes_unclaimed)),
+                Some(SlotOccupant::Provisional { name }) => Some((slot as u8, name.as_str())),
                 _ => None,
             })
     }
@@ -491,7 +447,7 @@ mod tests {
 
         assert_eq!(registry.get_provisional(2), Some("PLAYER 8K"));
         assert!(!registry.is_registered(2));
-        assert!(registry.has_provisional());
+        assert_eq!(registry.provisional_len(), 1);
     }
 
     #[test]
@@ -567,49 +523,27 @@ mod tests {
     }
 
     #[test]
-    fn an_unclaimed_name_is_dropped_after_max_passes() {
+    fn a_new_reading_replaces_the_old_provisionals() {
         let mut registry = RaidSlotRegistry::new(4);
-        for _ in 0..PROVISIONAL_MAX_PASSES {
-            registry.assign_provisional_slots([(0, "Ghost".into())]);
-        }
-        assert_eq!(registry.get_provisional(0), Some("Ghost"));
+        registry.assign_provisional_slots([(0, "Ghost".into()), (1, "Alpha".into())]);
 
-        registry.assign_provisional_slots([(0, "Ghost".into())]);
+        registry.assign_provisional_slots([(1, "Bravo".into())]);
+
+        // Ghost stopped appearing, so it does not linger in slot 0.
         assert_eq!(registry.get_provisional(0), None);
+        assert_eq!(registry.get_provisional(1), Some("Bravo"));
     }
 
     #[test]
-    fn a_new_reading_restarts_the_unclaimed_count() {
+    fn clear_resets_ambiguity() {
         let mut registry = RaidSlotRegistry::new(4);
         registry.assign_provisional_slots([(0, "Ghost".into())]);
-        registry.assign_provisional_slots([(0, "Ghost".into())]);
-        registry.assign_provisional_slots([(0, "Rider".into())]);
-
-        // The rename reset the count, so Rider gets its own full run.
-        for _ in 0..PROVISIONAL_MAX_PASSES {
-            registry.assign_provisional_slots([(0, "Rider".into())]);
-            assert_eq!(registry.get_provisional(0), Some("Rider"));
-        }
-        registry.assign_provisional_slots([(0, "Rider".into())]);
-        assert_eq!(registry.get_provisional(0), None);
-    }
-
-    #[test]
-    fn clear_resets_ambiguity_and_aging() {
-        let mut registry = RaidSlotRegistry::new(4);
-        for _ in 0..PROVISIONAL_MAX_PASSES {
-            registry.assign_provisional_slots([(0, "Ghost".into())]);
-        }
         registry.set_ambiguous_slots([0]);
 
         registry.clear();
-        assert!(!registry.is_ambiguous(0));
 
-        // A fresh session's reading gets its full run, not the old count.
-        for _ in 0..PROVISIONAL_MAX_PASSES {
-            registry.assign_provisional_slots([(0, "Ghost".into())]);
-            assert_eq!(registry.get_provisional(0), Some("Ghost"));
-        }
+        assert!(!registry.is_ambiguous(0));
+        assert_eq!(registry.get_provisional(0), None);
     }
 
     #[test]

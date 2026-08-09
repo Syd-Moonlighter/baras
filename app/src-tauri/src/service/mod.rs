@@ -497,20 +497,6 @@ impl SignalHandler for CombatSignalHandler {
                 self.shared.in_combat.store(true, Ordering::SeqCst);
                 let _ = self.trigger_tx.try_send(MetricsTrigger::CombatStarted);
                 let _ = self.session_event_tx.send(SessionEvent::CombatStarted);
-                let should_rematch = self.shared.is_live_tailing.load(Ordering::SeqCst)
-                    && self
-                        .shared
-                        .raid_registry
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .has_provisional();
-                if should_rematch {
-                    let overlay_tx = self.overlay_tx.clone();
-                    tokio::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        let _ = overlay_tx.send(OverlayUpdate::DetectRaidNames).await;
-                    });
-                }
                 // Always wipe a stale boss HP bar at the start of a new encounter.
                 // With `clear_after_combat` disabled the bar persists post-combat, but
                 // it must not linger into the next fight (e.g. trash after a boss).
@@ -603,6 +589,9 @@ impl SignalHandler for CombatSignalHandler {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
                 registry.update_discipline(*entity_id, *class_id, *discipline_id);
+                // This may be the log identity a provisional slot is waiting
+                // for; the raid tick re-matches when the flag is set.
+                self.shared.roster_changed.store(true, Ordering::Relaxed);
                 if self.local_player_id != Some(*entity_id) {
                     let _ = self.session_event_tx.send(SessionEvent::PlayerInitialized);
                 }
