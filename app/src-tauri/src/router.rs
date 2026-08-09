@@ -258,9 +258,9 @@ async fn detect_raid_names(
 
     let slot_count = slots.len();
     let candidate_count = candidates.len();
-    let (dump_enabled, dump_max_mb) = {
+    let (dump_enabled, dump_max) = {
         let config = service_handle.shared.config.read().await;
-        (config.ocr_debug_dump, config.ocr_debug_max_mb)
+        (config.ocr_debug_dump, config.ocr_debug_max_dumps)
     };
 
     // Log first so stalled runs still include the hardware details.
@@ -282,7 +282,7 @@ async fn detect_raid_names(
 
     let result = tokio::task::spawn_blocking(move || {
         let mut dump = dump_enabled
-            .then(|| baras_raid_ocr::DebugDump::new(slot_count, dump_max_mb))
+            .then(|| baras_raid_ocr::DebugDump::new(slot_count, dump_max))
             .flatten();
         let read_started = std::time::Instant::now();
         let mut reading = baras_raid_ocr::observe_slots_dumping(&image, &slots, dump.as_mut());

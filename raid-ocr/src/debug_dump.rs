@@ -10,7 +10,6 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
 
 use baras_overlay::capture::CapturedImage;
 use crate::analysis::{Band, BandKind, PreparedCrop};
@@ -28,51 +27,13 @@ fn session_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// Bytes on disk under [`dump_root`]. Walked once, then kept up to date:
-/// rescanning every pass would grow with the cap.
-static TREE_BYTES: OnceLock<Mutex<u64>> = OnceLock::new();
-
-fn tree_bytes() -> &'static Mutex<u64> {
-    TREE_BYTES.get_or_init(|| Mutex::new(measure_tree()))
-}
-
-/// Size of one dump directory. Dumps are flat, so one level covers it.
-fn dir_bytes(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|files| {
-            files
-                .flatten()
-                .filter_map(|f| f.metadata().ok())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
-fn measure_tree() -> u64 {
-    dump_root()
-        .and_then(|root| std::fs::read_dir(root).ok())
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().is_dir())
-                .map(|e| dir_bytes(&e.path()))
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
-/// Delete the oldest dumps until the tree fits in `max_mb`.
+/// Delete the oldest dumps so that this pass's dump brings the tree to at
+/// most `max_dumps` entries.
 ///
 /// Checked only when a new dump is about to be written, so leaving the option
 /// on costs nothing on a pass that is not dumping.
-fn prune(max_mb: u32) {
-    let budget = u64::from(max_mb) * 1024 * 1024;
-    let mut total = tree_bytes().lock().unwrap_or_else(|p| p.into_inner());
-    if *total <= budget {
-        return;
-    }
-
+fn prune(max_dumps: u32) {
+    let keep = max_dumps.saturating_sub(1) as usize;
     let Some(root) = dump_root() else { return };
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
@@ -83,15 +44,13 @@ fn prune(max_mb: u32) {
         .filter(|e| e.path().is_dir())
         .map(|e| e.path())
         .collect();
+    if dumps.len() <= keep {
+        return;
+    }
     dumps.sort();
 
-    for path in &dumps {
-        if *total <= budget {
-            break;
-        }
-        let size = dir_bytes(path);
+    for path in &dumps[..dumps.len() - keep] {
         if std::fs::remove_dir_all(path).is_ok() {
-            *total = total.saturating_sub(size);
             tracing::debug!("Pruned OCR debug dump {path:?}");
         }
     }
@@ -106,10 +65,10 @@ pub struct DebugDump {
 impl DebugDump {
     /// Create a dump directory for this pass, or `None` if it cannot be made.
     ///
-    /// Prunes to `max_mb` first, so the tree is capped by what is about to be
-    /// added rather than growing until someone notices.
-    pub fn new(slot_count: usize, max_mb: u32) -> Option<Self> {
-        prune(max_mb);
+    /// Prunes to `max_dumps` first, counting the dump about to be written, so
+    /// the tree never holds more than that many detections.
+    pub fn new(slot_count: usize, max_dumps: u32) -> Option<Self> {
+        prune(max_dumps);
         let dir = session_dir()?;
         let mut notes = String::new();
         let _ = writeln!(notes, "BARAS raid OCR debug dump");
@@ -208,9 +167,6 @@ impl DebugDump {
         } else {
             tracing::info!("OCR debug dump written to {:?}", self.dir);
         }
-        // All on disk now, so this is what the pass cost.
-        let written = dir_bytes(&self.dir);
-        *tree_bytes().lock().unwrap_or_else(|p| p.into_inner()) += written;
     }
 }
 

@@ -3280,13 +3280,13 @@ pub struct AppConfig {
     #[serde(default = "default_true")]
     pub ocr_debug_dump: bool,
 
-    /// Cap on the dump directory. The oldest dumps are pruned before a new one
-    /// is written, so leaving the option on cannot fill a disk.
-    #[serde(default = "default_ocr_debug_max_mb")]
-    pub ocr_debug_max_mb: u32,
+    /// How many detections to keep. The oldest dumps are pruned before a new
+    /// one is written, so leaving the option on cannot fill a disk.
+    #[serde(default = "default_ocr_debug_max_dumps")]
+    pub ocr_debug_max_dumps: u32,
 }
 
-fn default_ocr_debug_max_mb() -> u32 {
+fn default_ocr_debug_max_dumps() -> u32 {
     100
 }
 
@@ -3329,7 +3329,7 @@ impl AppConfig {
             data_explorer_auto_live: false,
             default_profile_per_role: std::collections::HashMap::new(),
             ocr_debug_dump: true,
-            ocr_debug_max_mb: 100,
+            ocr_debug_max_dumps: 100,
         }
     }
 }

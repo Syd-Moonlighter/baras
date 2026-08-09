@@ -87,7 +87,7 @@ pub fn App() -> Element {
     let mut file_browser_filter = use_signal(String::new);
     let mut hide_small_log_files = use_signal(|| true);
     let mut ocr_debug_dump = use_signal(|| true);
-    let mut ocr_debug_max_mb = use_signal(|| 100u32);
+    let mut ocr_debug_max_dumps = use_signal(|| 100u32);
 
     // UI Session State - unified state that persists across tab switches
     let mut ui_state = use_signal(UiSessionState::default);
@@ -192,7 +192,7 @@ pub fn App() -> Element {
             retention_days.set(config.log_retention_days);
             hide_small_log_files.set(config.hide_small_log_files);
             ocr_debug_dump.set(config.ocr_debug_dump);
-            ocr_debug_max_mb.set(config.ocr_debug_max_mb);
+            ocr_debug_max_dumps.set(config.ocr_debug_max_dumps);
             minimize_to_tray.set(config.minimize_to_tray);
             european_number_format.set(config.european_number_format);
             parsely_username.set(config.parsely.username);
@@ -2033,21 +2033,21 @@ pub fn App() -> Element {
                                 }
                                 p { class: "hint", "Writes what name detection saw to baras/ocr-debug, so a misread name can be diagnosed from the images rather than guessed at." }
                                 div { class: "setting-row",
-                                    label { "Keep at most (MB)" }
+                                    label { "Detections to keep" }
                                     input {
                                         r#type: "number",
-                                        min: "10",
-                                        max: "10000",
-                                        step: "10",
-                                        value: "{ocr_debug_max_mb()}",
+                                        min: "1",
+                                        max: "1000",
+                                        step: "1",
+                                        value: "{ocr_debug_max_dumps()}",
                                         onchange: move |e| {
-                                            let Ok(mb) = e.value().parse::<u32>() else { return };
-                                            let mb = mb.clamp(10, 10_000);
-                                            ocr_debug_max_mb.set(mb);
+                                            let Ok(count) = e.value().parse::<u32>() else { return };
+                                            let count = count.clamp(1, 1000);
+                                            ocr_debug_max_dumps.set(count);
                                             let mut toast = use_toast();
                                             spawn(async move {
                                                 if let Some(mut cfg) = api::get_config().await {
-                                                    cfg.ocr_debug_max_mb = mb;
+                                                    cfg.ocr_debug_max_dumps = count;
                                                     if let Err(err) = api::update_config(&cfg).await {
                                                         toast.show(format!("Failed to save settings: {}", err), ToastSeverity::Normal);
                                                     }
@@ -2056,7 +2056,7 @@ pub fn App() -> Element {
                                         }
                                     }
                                 }
-                                p { class: "hint", "The oldest images are deleted before each new detection, so the folder never grows past this." }
+                                p { class: "hint", "The oldest detections are deleted before each new one, so the folder never holds more than this many." }
                             }
 
                             div { class: "settings-section",
