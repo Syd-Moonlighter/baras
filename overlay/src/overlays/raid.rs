@@ -319,8 +319,10 @@ pub enum InteractionMode {
 }
 
 impl InteractionMode {
+    /// Only in rearrange mode: move mode is for aligning the frame, and the
+    /// button would sit in the middle of the drag surface.
     fn shows_detect_button(self) -> bool {
-        matches!(self, Self::Move | Self::Rearrange)
+        crate::capture::SUPPORTED && matches!(self, Self::Rearrange)
     }
 }
 
@@ -853,6 +855,11 @@ impl RaidOverlay {
     }
 
     fn emit_detect_action(&mut self) {
+        // No capture backend (macOS): the button is hidden, and the hotkey
+        // lands here too, so it dead-ends in one place.
+        if !crate::capture::SUPPORTED {
+            return;
+        }
         if self.detection_result_rx.is_some() {
             self.set_detection_message("Detection is already running".into());
             return;

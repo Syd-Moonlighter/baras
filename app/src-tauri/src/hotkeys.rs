@@ -370,6 +370,9 @@ pub fn spawn_register_hotkeys(
             }
         }
 
+        // No capture backend on macOS: don't grab a system-wide key combo
+        // for an action that cannot run.
+        #[cfg(not(target_os = "macos"))]
         if let Some(ref key_str) = hotkeys.detect_raid_names {
             if let Ok(shortcut) = key_str.parse::<Shortcut>() {
                 let state = overlay_state.clone();
@@ -487,6 +490,7 @@ async fn toggle_live_mode_hotkey(service: ServiceHandle) {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 async fn detect_raid_names_hotkey(overlay_state: SharedOverlayState) {
     let raid_tx = {
         let state = match overlay_state.lock() {

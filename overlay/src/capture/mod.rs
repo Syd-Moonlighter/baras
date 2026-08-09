@@ -12,6 +12,10 @@ mod unix;
 #[cfg(all(unix, not(target_os = "macos")))]
 use unix as backend;
 
+/// Whether this platform has a capture backend at all. macOS has none, so
+/// callers can hide detection UI rather than fail at press time.
+pub const SUPPORTED: bool = cfg!(any(target_os = "windows", all(unix, not(target_os = "macos"))));
+
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 mod backend {
     use super::{CaptureError, CapturedImage};
