@@ -2517,7 +2517,6 @@ impl CombatService {
 
             // Throttle stale-recovery checks to once per second
             let mut last_stale_check = tokio::time::Instant::now();
-            let mut last_promotion_check = tokio::time::Instant::now();
 
             loop {
                 // Check which overlays are active to determine sleep interval
@@ -2570,9 +2569,8 @@ impl CombatService {
 
                 // Update whenever there are effects (or always in rearrange mode)
                 if raid_active {
-                    // This is a roster lookup, running once every second is fine
-                    if last_promotion_check.elapsed() >= std::time::Duration::from_secs(1) {
-                        last_promotion_check = tokio::time::Instant::now();
+                    // Only a newly registered player can settle a provisional slot.
+                    if shared.roster_changed.swap(false, Ordering::Relaxed) {
                         promote_provisional_slots(&shared).await;
                     }
 
@@ -3348,7 +3346,11 @@ async fn build_raid_frame_data(
     // The registry handles duplicate rejection via try_register
     for target in tracker.take_new_targets() {
         let name = resolve(target.name).to_string();
-        registry.try_register(target.entity_id, name);
+        // A new player is the only thing that can settle a provisional slot, so
+        // it is what schedules the match rather than a timer.
+        if registry.try_register(target.entity_id, name).is_some() {
+            shared.roster_changed.store(true, Ordering::Relaxed);
+        }
     }
 
     // Group effects by target for registered players only

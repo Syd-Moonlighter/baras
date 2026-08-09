@@ -136,6 +136,8 @@ pub struct SharedState {
     pub is_live_tailing: AtomicBool,
     /// Raid frame slot assignments (persists player positions)
     pub raid_registry: Mutex<RaidSlotRegistry>,
+    /// A player was registered since the provisional slots were last matched.
+    pub roster_changed: AtomicBool,
     /// Current area ID for lazy loading timers (0 = unknown)
     pub current_area_id: AtomicI64,
     /// Last known local player entity ID (survives handler recreation across start_tailing calls)
@@ -189,6 +191,7 @@ impl SharedState {
             watching: AtomicBool::new(false),
             is_live_tailing: AtomicBool::new(true), // Start in live tailing mode
             raid_registry: Mutex::new(RaidSlotRegistry::new(raid_slots)),
+            roster_changed: AtomicBool::new(false),
             current_area_id: AtomicI64::new(0),
             last_player_id: AtomicI64::new(0),
             last_player_role: std::sync::atomic::AtomicU8::new(0),

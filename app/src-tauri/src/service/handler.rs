@@ -556,6 +556,13 @@ impl ServiceHandle {
             registry.assign_provisional_slots(assignments);
             (registry.provisional_len(), registry.registered_len())
         };
+        // New provisionals are the other half of the pairing: match them against
+        // players already on the roster.
+        if counts.0 > 0 {
+            self.shared
+                .roster_changed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.refresh_raid_frames().await;
         counts
     }
