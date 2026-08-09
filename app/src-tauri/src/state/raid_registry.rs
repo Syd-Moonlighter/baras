@@ -46,6 +46,8 @@ pub struct RaidSlotRegistry {
     provisional_slots: HashMap<u8, String>,
     /// Fights each provisional name has survived without being claimed.
     provisional_age: HashMap<u8, u8>,
+    /// Slots whose reading fitted two or more players equally well.
+    ambiguous_slots: HashSet<u8>,
     /// Reverse lookup: entity_id → slot
     entity_to_slot: HashMap<i64, u8>,
     /// Maximum number of slots (configurable, default 8)
@@ -62,6 +64,7 @@ impl RaidSlotRegistry {
             slots: HashMap::new(),
             provisional_slots: HashMap::new(),
             provisional_age: HashMap::new(),
+            ambiguous_slots: HashSet::new(),
             entity_to_slot: HashMap::new(),
             max_slots,
             pending_disciplines: HashMap::new(),
@@ -90,6 +93,8 @@ impl RaidSlotRegistry {
             .map(|(slot, _)| slot);
         let slot = provisional_slot.or_else(|| self.find_first_available_slot())?;
         self.provisional_slots.remove(&slot);
+        // A real player settles whatever the reading could not.
+        self.ambiguous_slots.remove(&slot);
         let mut player = RegisteredPlayer::new(entity_id, name);
 
         // Check for pending discipline info (DisciplineChanged often fires before registration)
@@ -287,6 +292,15 @@ impl RaidSlotRegistry {
 
     pub fn provisional_len(&self) -> usize {
         self.provisional_slots.len()
+    }
+
+    /// Mark the slots a reading could not choose a player for.
+    pub fn set_ambiguous_slots(&mut self, slots: impl IntoIterator<Item = u8>) {
+        self.ambiguous_slots = slots.into_iter().collect();
+    }
+
+    pub fn is_ambiguous(&self, slot: u8) -> bool {
+        self.ambiguous_slots.contains(&slot)
     }
 
     /// Age every provisional name by one fight, dropping those never claimed.

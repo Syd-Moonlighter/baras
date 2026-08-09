@@ -120,6 +120,8 @@ async fn process_registry_action(
 }
 
 struct RaidOcrResult {
+    /// Slots holding no frame at all.
+    empty_slots: usize,
     observations: Vec<baras_core::raid_detect::RowObservation>,
     assignments: Vec<baras_core::raid_detect::RowAssignment>,
     decisions: Vec<baras_core::raid_detect::RowDecision>,
@@ -181,13 +183,13 @@ fn raid_row_lines(
                 ),
                 (None, Some(best), reason) => format!(
                     "{head} | unassigned: {}; closest {} at {:.2} ({})",
-                    reason.unwrap_or("no reason recorded"),
+                    reason.map_or("no reason recorded", |r| r.reason()),
                     best.name,
                     best.total.max(best.name_score),
                     support(best)
                 ),
                 (None, None, reason) => {
-                    format!("{head} | unassigned: {}", reason.unwrap_or("no candidates"))
+                    format!("{head} | unassigned: {}", reason.map_or("no candidates", |r| r.reason()))
                 }
             }
         })
@@ -203,7 +205,15 @@ fn raid_detection_message(
     confirmed: usize,
     unconfirmed: usize,
     candidate_count: usize,
+    ambiguous: usize,
 ) -> String {
+    // Lookalikes are the one failure reading again cannot fix, so it leads.
+    if ambiguous > 0 {
+        return format!(
+            "{ambiguous} names too alike to tell apart: sort them out in rearrange mode ({confirmed} confirmed)"
+        );
+    }
+
     let state = match (confirmed, unconfirmed) {
         (0, 0) => "no names assigned".to_string(),
         (confirmed, 0) => format!("{confirmed} confirmed"),
@@ -282,6 +292,7 @@ async fn detect_raid_names(
         );
 
         RaidOcrResult {
+            empty_slots: reading.empty_slots(),
             observations: reading.rows,
             assignments,
             decisions,
@@ -299,6 +310,7 @@ async fn detect_raid_names(
     };
 
     let RaidOcrResult {
+        empty_slots,
         observations,
         assignments,
         decisions,
@@ -315,21 +327,22 @@ async fn detect_raid_names(
         tracing::info!(
             elapsed_ms,
             candidate_count,
+            empty_slots,
             "Raid name detection could not read any names"
         );
-        // Health without names means the frames were found but the names sit
-        // above the cells: the grid is placed too low or its cells too short.
-        let _ = result_tx.send(
-            if observations
-                .iter()
-                .any(|o| o.hp_value.is_some() || o.hp_percent.is_some())
-            {
-                "Health read but no names: move the grid up so each name is inside its cell"
-            } else {
-                "No names read: check the raid frame alignment"
-            }
-            .into(),
-        );
+        // No frame anywhere is not a failure to read: the group is smaller than
+        // the grid, or the grid is somewhere the frames are not.
+        let message = if empty_slots == slot_count {
+            "No raid frames found: check the grid is over them".to_string()
+        } else if observations
+            .iter()
+            .any(|o| o.hp_value.is_some() || o.hp_percent.is_some())
+        {
+            "Health read but no names: move the grid up so each name is inside its cell".to_string()
+        } else {
+            format!("No names read from {} frames: check alignment", slot_count - empty_slots)
+        };
+        let _ = result_tx.send(message);
         return;
     }
 
@@ -351,12 +364,23 @@ async fn detect_raid_names(
         "Raid name detection complete"
     );
 
+    // Two or three lookalikes need a human, so mark them for the overlay to
+    // pulse rather than telling the user to read again.
+    let ambiguous: Vec<u8> = decisions
+        .iter()
+        .filter(|d| d.rejected == Some(baras_core::raid_detect::Rejection::Ambiguous))
+        .filter_map(|d| u8::try_from(d.row).ok())
+        .collect();
+    let ambiguous_count = ambiguous.len();
+    service_handle.set_ambiguous_slots(ambiguous).await;
+
     let _ = result_tx.send(raid_detection_message(
         slot_count,
         names_read,
         matched,
         provisional,
         candidate_count,
+        ambiguous_count,
     ));
 }
 
@@ -941,19 +965,19 @@ async fn process_overlay_update(
 mod raid_detection_message_tests {
     use super::raid_detection_message;
 
-    /// Arguments are (slots, names read, confirmed, unconfirmed, roster).
+    /// Arguments are (slots, names read, confirmed, unconfirmed, roster, ambiguous).
     #[test]
     fn reports_the_grid_as_it_now_stands() {
         assert_eq!(
-            raid_detection_message(8, 8, 7, 1, 8),
+            raid_detection_message(8, 8, 7, 1, 8, 0),
             "OCR read 8/8: 7 confirmed, 1 unconfirmed (log roster 8)"
         );
         assert_eq!(
-            raid_detection_message(8, 8, 8, 0, 8),
+            raid_detection_message(8, 8, 8, 0, 8, 0),
             "OCR read 8/8: 8 confirmed (log roster 8)"
         );
         assert_eq!(
-            raid_detection_message(8, 6, 6, 0, 8),
+            raid_detection_message(8, 6, 6, 0, 8, 0),
             "OCR read 6/8: 6 confirmed (log roster 8)"
         );
     }
@@ -962,7 +986,7 @@ mod raid_detection_message_tests {
     #[test]
     fn an_empty_roster_is_explained_rather_than_counted() {
         assert_eq!(
-            raid_detection_message(8, 8, 0, 8, 0),
+            raid_detection_message(8, 8, 0, 8, 0, 0),
             "OCR read 8/8: 8 unconfirmed (no log roster yet)"
         );
     }
@@ -972,8 +996,18 @@ mod raid_detection_message_tests {
     #[test]
     fn a_roster_larger_than_the_frame_count_is_not_a_failure() {
         assert_eq!(
-            raid_detection_message(8, 8, 8, 0, 9),
+            raid_detection_message(8, 8, 8, 0, 9, 0),
             "OCR read 8/8: 8 confirmed (log roster 9)"
+        );
+    }
+
+    /// Reading again cannot separate lookalikes, so that case says so instead
+    /// of reporting a count the user would try to improve.
+    #[test]
+    fn lookalikes_ask_for_a_human_rather_than_another_read() {
+        assert_eq!(
+            raid_detection_message(8, 8, 6, 2, 8, 2),
+            "2 names too alike to tell apart: sort them out in rearrange mode (6 confirmed)"
         );
     }
 }

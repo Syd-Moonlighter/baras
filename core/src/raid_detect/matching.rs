@@ -132,6 +132,36 @@ fn hp_value_score(observed: u32, candidate: &PlayerCandidate) -> f32 {
     best
 }
 
+/// Why a row was left unassigned.
+///
+/// These want different things from the user: reading again may fix a weak
+/// name, but never separates two players who look alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejection {
+    /// Nothing legible in the frame.
+    NoName,
+    /// Read, but nobody on the roster is close enough.
+    NoCandidate,
+    /// Two or more players fit equally well. Needs a human.
+    Ambiguous,
+    /// Matched, but another row fit the same player better.
+    TakenByBetterRow,
+    /// No log roster to match against yet.
+    NoRoster,
+}
+
+impl Rejection {
+    pub fn reason(self) -> &'static str {
+        match self {
+            Rejection::NoName => "no readable name",
+            Rejection::NoCandidate => "no candidate above min_confidence",
+            Rejection::Ambiguous => "too close to the next-best candidate",
+            Rejection::TakenByBetterRow => "every matching player went to a better row",
+            Rejection::NoRoster => "no roster to match against",
+        }
+    }
+}
+
 /// One health signal's contribution to a score.
 #[derive(Debug, Clone, Copy)]
 pub struct Contribution {
@@ -225,7 +255,7 @@ pub struct RowDecision {
     /// Score of the next-best candidate behind `best`.
     pub runner_up: f32,
     /// Why the row went unassigned.
-    pub rejected: Option<&'static str>,
+    pub rejected: Option<Rejection>,
 }
 
 /// Match raid-frame rows to log players.
@@ -271,7 +301,7 @@ pub fn assign_rows_explained(
                 assigned: None,
                 best: None,
                 runner_up: 0.0,
-                rejected: Some("no roster to match against"),
+                rejected: Some(Rejection::NoRoster),
             })
             .collect();
         return (Vec::new(), decisions);
@@ -331,11 +361,11 @@ pub fn assign_rows_explained(
 
         let Some(candidate_idx) = candidate_idx else {
             decision.rejected = Some(if normalized[row_idx].is_none() {
-                "no readable name"
+                Rejection::NoName
             } else if decision.best.as_ref().is_some_and(|b| b.total > 0.0) {
-                "every matching player went to a better row"
+                Rejection::TakenByBetterRow
             } else {
-                "no candidate above min_confidence"
+                Rejection::NoCandidate
             });
             decisions.push(decision);
             continue;
@@ -350,7 +380,7 @@ pub fn assign_rows_explained(
             .fold(0.0f32, f32::max);
 
         if score - margin_runner_up < config.min_margin {
-            decision.rejected = Some("too close to the next-best candidate");
+            decision.rejected = Some(Rejection::Ambiguous);
             decisions.push(decision);
             continue;
         }

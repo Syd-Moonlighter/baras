@@ -567,6 +567,16 @@ impl ServiceHandle {
         counts
     }
 
+    /// Mark the slots whose reading fitted more than one player.
+    pub async fn set_ambiguous_slots(&self, slots: Vec<u8>) {
+        self.shared
+            .raid_registry
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_ambiguous_slots(slots);
+        self.refresh_raid_frames().await;
+    }
+
     /// Clear all raid registry slots
     pub async fn clear_raid_registry(&self) {
         self.shared.raid_registry.lock().unwrap_or_else(|p| p.into_inner()).clear();

@@ -530,6 +530,7 @@ mod examples {
                 effects: vec![RaidEffect::new(100, "Guard")
                     .with_color(tiny_skia::Color::from_rgba8(100, 150, 220, 255))],
                 is_self: true,
+                ambiguous: false,
             },
             // Slot 1: Healer
             RaidFrame {
@@ -543,6 +544,7 @@ mod examples {
                     .with_color(tiny_skia::Color::from_rgba8(100, 220, 100, 255))
                     .with_charges(2)],
                 is_self: false,
+                ambiguous: false,
             },
             // Slot 2: DPS
             RaidFrame {
@@ -559,6 +561,7 @@ mod examples {
                         .with_color(tiny_skia::Color::from_rgba8(200, 200, 100, 255)),
                 ],
                 is_self: false,
+                ambiguous: false,
             },
             // Slot 3: DPS (no effects)
             RaidFrame {
@@ -570,6 +573,7 @@ mod examples {
                 class_icon: Some("assassin.png".to_string()),
                 effects: vec![],
                 is_self: false,
+                ambiguous: false,
             },
             // Slot 4: Off-tank
             RaidFrame {
@@ -582,6 +586,7 @@ mod examples {
                 effects: vec![RaidEffect::new(400, "Saber Ward")
                     .with_color(tiny_skia::Color::from_rgba8(255, 200, 100, 255))],
                 is_self: false,
+                ambiguous: false,
             },
             // Slot 5: Healer (no effects)
             RaidFrame {
@@ -593,6 +598,7 @@ mod examples {
                 class_icon: Some("operative.png".to_string()),
                 effects: vec![],
                 is_self: false,
+                ambiguous: false,
             },
             // Slot 6: DPS with debuff
             RaidFrame {
@@ -606,6 +612,7 @@ mod examples {
                     .with_color(tiny_skia::Color::from_rgba8(255, 100, 50, 255))
                     .with_is_buff(false)],
                 is_self: false,
+                ambiguous: false,
             },
             // Slot 7: Empty slot
             RaidFrame::empty(7),
@@ -803,6 +810,7 @@ mod examples {
                     class_icon: None,
                     effects: vec![effect1, effect2],
                     is_self: slot == 0,
+                    ambiguous: false,
                 }
             })
             .collect()

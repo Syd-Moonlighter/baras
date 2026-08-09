@@ -3276,7 +3276,7 @@ async fn promote_provisional_slots(shared: &Arc<SharedState>) {
 /// Uses RaidSlotRegistry to maintain stable player positions.
 /// Players are registered ONLY when the local player applies a NEW effect to them
 /// (via the new_targets queue), not on every tick.
-fn provisional_raid_frame(slot: u8, name: &str) -> RaidFrame {
+fn provisional_raid_frame(slot: u8, name: &str, ambiguous: bool) -> RaidFrame {
     RaidFrame {
         slot,
         player_id: None,
@@ -3286,6 +3286,7 @@ fn provisional_raid_frame(slot: u8, name: &str) -> RaidFrame {
         class_icon: None,
         effects: Vec::new(),
         is_self: false,
+        ambiguous,
     }
 }
 
@@ -3298,7 +3299,7 @@ fn provisional_raid_frame_data(shared: &Arc<SharedState>) -> Option<RaidFrameDat
         .filter_map(|slot| {
             registry
                 .get_provisional(slot)
-                .map(|name| provisional_raid_frame(slot, name))
+                .map(|name| provisional_raid_frame(slot, name, registry.is_ambiguous(slot)))
         })
         .collect();
     (!frames.is_empty()).then_some(RaidFrameData { frames })
@@ -3418,9 +3419,10 @@ async fn build_raid_frame_data(
                 class_icon,
                 effects,
                 is_self: player.entity_id == local_player_id,
+                ambiguous: registry.is_ambiguous(slot),
             });
         } else if let Some(name) = registry.get_provisional(slot) {
-            frames.push(provisional_raid_frame(slot, name));
+            frames.push(provisional_raid_frame(slot, name, registry.is_ambiguous(slot)));
         }
     }
 

@@ -198,6 +198,9 @@ pub struct RaidFrame {
     pub effects: Vec<RaidEffect>,
     /// Is this the local player?
     pub is_self: bool,
+    /// The reading fitted two or more players equally well. Pulses in
+    /// rearrange mode so the user can see which frames to sort out.
+    pub ambiguous: bool,
 }
 
 impl RaidFrame {
@@ -212,6 +215,7 @@ impl RaidFrame {
             class_icon: None,
             effects: Vec::new(),
             is_self: false,
+            ambiguous: false,
         }
     }
 
@@ -560,6 +564,9 @@ pub fn raid_slot_rects(
 /// This reduces CPU usage significantly while still providing smooth timer countdowns
 const RENDER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
 
+/// One breath of an ambiguous frame's border.
+const AMBIGUOUS_PULSE_SECS: f32 = 1.2;
+
 /// The complete raid frame overlay
 pub struct RaidOverlay {
     frame: OverlayFrame,
@@ -578,6 +585,8 @@ pub struct RaidOverlay {
     /// Dirty flag - when true, the overlay needs to be re-rendered
     /// In rearrange mode, we skip rendering when this is false to save CPU
     needs_render: bool,
+    /// Clock the ambiguous pulse runs off.
+    pulse_since: Instant,
     /// Last render timestamp for frame rate limiting
     last_render: Instant,
     /// Pending registry actions to be sent to the service
@@ -612,6 +621,7 @@ impl RaidOverlay {
             config,
             overflow_count: 0,
             needs_render: true,                            // Initial render needed
+            pulse_since: Instant::now(),
             last_render: Instant::now() - RENDER_INTERVAL, // Allow immediate first render
             pending_registry_actions: Vec::new(),
             detection_result_rx: None,
@@ -935,8 +945,11 @@ impl RaidOverlay {
 
         match self.interaction_mode {
             InteractionMode::Rearrange => {
-                // Only render on state change (click, data update, etc.)
-                if !self.needs_render {
+                // Only render on state change (click, data update, etc.),
+                // unless a frame is pulsing and needs the clock.
+                let pulsing = self.frames.iter().any(|f| f.ambiguous);
+                if !self.needs_render && !(pulsing && now.duration_since(self.last_render) >= RENDER_INTERVAL)
+                {
                     return;
                 }
             }
@@ -1464,6 +1477,19 @@ impl RaidOverlay {
         effect_size + vertical_offset.max(3.0)
     }
 
+    /// Provisional orange, breathing between dim and full over `AMBIGUOUS_PULSE`.
+    ///
+    /// Slow on purpose: this is a "sort these out" hint, not an alarm.
+    fn ambiguous_pulse(&self) -> Color {
+        let phase =
+            (self.pulse_since.elapsed().as_secs_f32() / AMBIGUOUS_PULSE_SECS) * std::f32::consts::TAU;
+        // 0.35..1.0, so the border never disappears entirely.
+        let level = 0.675 + 0.325 * phase.sin();
+        let mut color = colors::raid_name_provisional();
+        color.set_alpha(level);
+        color
+    }
+
     /// Render the clickable overlay for rearrange mode
     fn render_rearrange_overlay(&mut self, raid_frame: &RaidFrame) {
         let (x, y, w, h) = self.slot_bounds(raid_frame.slot);
@@ -1484,11 +1510,14 @@ impl RaidOverlay {
         self.frame
             .fill_rounded_rect(x, y, w, h, corner_radius, overlay_color);
 
-        // Border
-        let border_color = if is_selected {
-            colors::raid_slot_text()
+        // Border. An ambiguous frame breathes so the two or three that could
+        // not be told apart stand out as a set to sort by hand.
+        let (border_color, border_width) = if is_selected {
+            (colors::raid_slot_text(), 2.0)
+        } else if raid_frame.ambiguous {
+            (self.ambiguous_pulse(), 3.0)
         } else {
-            colors::text_muted()
+            (colors::text_muted(), 2.0)
         };
         self.frame.stroke_rounded_rect(
             x + 1.0,
@@ -1496,7 +1525,7 @@ impl RaidOverlay {
             w - 2.0,
             h - 2.0,
             corner_radius - 1.0,
-            2.0,
+            border_width,
             border_color,
         );
 
