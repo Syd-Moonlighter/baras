@@ -22,6 +22,13 @@ static DATA_EXPLORER_CSS: Asset = asset!("/assets/data-explorer.css");
 static LOGO: Asset = asset!("/assets/logo.png");
 static FONT: Asset = asset!("/assets/StarJedi.ttf");
 
+/// WASM cannot cfg on the host OS, so ask the webview instead.
+fn is_macos() -> bool {
+    web_sys::window()
+        .map(|w| w.navigator().user_agent().unwrap_or_default().contains("Macintosh"))
+        .unwrap_or(false)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // App Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2011,6 +2018,12 @@ pub fn App() -> Element {
 
                             div { class: "settings-section",
                                 h4 { "Name Detection" }
+                                if is_macos() {
+                                    p { class: "hint hint-warning",
+                                        i { class: "fa-solid fa-triangle-exclamation" }
+                                        " Name detection is not supported on macOS."
+                                    }
+                                }
                                 div { class: "setting-row",
                                     label { "Save detection images" }
                                     input {
@@ -2112,6 +2125,12 @@ pub fn App() -> Element {
                                             value: hotkey_live_mode(),
                                             on_change: move |v| hotkey_live_mode.set(v),
                                         }
+                                    }
+                                }
+                                if is_macos() {
+                                    p { class: "hint hint-warning",
+                                        i { class: "fa-solid fa-triangle-exclamation" }
+                                        " Detect Raid Names is not supported on macOS."
                                     }
                                 }
                                 div { class: "settings-footer",
