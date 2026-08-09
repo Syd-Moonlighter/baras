@@ -210,7 +210,9 @@ fn raid_detection_message(
     ambiguous: usize,
 ) -> String {
     if names == 0 {
-        return "No names detected".to_string();
+        // Saying the frames were kept is what makes the no-op legible:
+        // without it, lingering assignments look like a bug.
+        return "No names detected. Frames unchanged.".to_string();
     }
     let noun = if names == 1 { "name" } else { "names" };
     let mut message = format!(
@@ -968,10 +970,14 @@ mod raid_detection_message_tests {
         );
     }
 
-    /// The user looking at the grid and the frames can see why on their own.
+    /// The user looking at the grid and the frames can see why on their own,
+    /// but they are told their assignments were deliberately left alone.
     #[test]
-    fn no_names_is_the_whole_message() {
-        assert_eq!(raid_detection_message(0, 0, 0, 0), "No names detected");
+    fn an_empty_pass_says_the_frames_were_kept() {
+        assert_eq!(
+            raid_detection_message(0, 0, 0, 0),
+            "No names detected. Frames unchanged."
+        );
     }
 
     /// The one outcome another read cannot fix asks for a human.
