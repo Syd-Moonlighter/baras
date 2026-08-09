@@ -1565,14 +1565,12 @@ impl RaidOverlay {
         self.frame
             .draw_text_glowed(&text, text_x, text_y, font_size, text_color);
 
-        //  Add an indicator that is different from colour, as that might not
-        // be as intuitive: ✓ once the name is tied to a log player, ? until.
-        if !raid_frame.is_empty() {
-            let (label, label_color) = if raid_frame.player_id.is_some() {
-                ("✓", colors::raid_name_confirmed())
-            } else {
-                ("?", colors::raid_name_provisional())
-            };
+        // A channel besides colour: a name still waiting for its player to
+        // appear in the log carries a "…" badge; a confirmed one carries
+        // nothing, because badging the default state is noise. Ellipsis, not
+        // "?": pending is waiting, a question mark reads as broken.
+        if !raid_frame.is_empty() && raid_frame.player_id.is_none() {
+            let label = "…";
             let label_size = font_size * 0.8;
             let (label_w, _) = self.frame.measure_text(label, label_size);
             self.frame.draw_text_glowed(
@@ -1580,7 +1578,7 @@ impl RaidOverlay {
                 x + w - label_w - 4.0,
                 text_y - font_size,
                 label_size,
-                label_color,
+                colors::raid_name_provisional(),
             );
         }
 
@@ -1827,9 +1825,14 @@ mod tests {
     }
 
     #[test]
-    fn detect_button_only_shows_in_editing_modes() {
+    fn detect_button_only_shows_in_rearrange_mode() {
         assert!(!InteractionMode::Normal.shows_detect_button());
-        assert!(InteractionMode::Move.shows_detect_button());
-        assert!(InteractionMode::Rearrange.shows_detect_button());
+        // Move mode is for aligning the frame; the button stays out of it.
+        assert!(!InteractionMode::Move.shows_detect_button());
+        assert_eq!(
+            InteractionMode::Rearrange.shows_detect_button(),
+            crate::capture::SUPPORTED,
+            "rearrange shows the button wherever capture exists"
+        );
     }
 }

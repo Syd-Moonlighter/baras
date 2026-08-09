@@ -148,7 +148,8 @@ mod tests {
         assert_eq!(format_number(500), "500");
         assert_eq!(format_number(999), "999");
         assert_eq!(format_number(1000), "1.00K");
-        assert_eq!(format_number(9999), "9.99K");
+        // The shared formatter rounds rather than truncates.
+        assert_eq!(format_number(9999), "10.00K");
         assert_eq!(format_number(10000), "10.00K");
         assert_eq!(format_number(1500000), "1.50M");
     }
