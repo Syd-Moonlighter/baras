@@ -18,7 +18,7 @@ const TARGET_HEIGHT: u32 = 64;
 const PAD_Y: i32 = 2;
 
 /// A crop ready for recognition: 8-bit grayscale, top-down.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PreparedCrop {
     pub width: u32,
     pub height: u32,

@@ -20,6 +20,7 @@ use analysis::{
     parse_health_text, prepare, reconcile_bars, slot_bands,
 };
 use baras_core::raid_detect::{
+    HEALTH_RESCUE_FLOOR, RowDecision, assign_rows_explained,
     MIN_OCR_NAME_CHARS, MatchConfig, PlayerCandidate, RowAssignment, RowObservation,
 };
 use baras_overlay::capture::CapturedImage;
@@ -71,10 +72,8 @@ fn clean_for_display(text: &str) -> String {
     }
 }
 
-/// Read every slot in a captured overlay region.
-///
-/// Empty slots are omitted.
-pub fn observe_slots(image: &CapturedImage, slots: &[SlotRect]) -> Vec<RowObservation> {
+/// Read the names in a captured overlay region. Empty slots are omitted.
+pub fn observe_slots(image: &CapturedImage, slots: &[SlotRect]) -> Reading {
     observe_slots_dumping(image, slots, None)
 }
 
@@ -86,7 +85,7 @@ pub fn observe_slots_dumping(
     image: &CapturedImage,
     slots: &[SlotRect],
     mut dump: Option<&mut DebugDump>,
-) -> Vec<RowObservation> {
+) -> Reading {
     if let Some(dump) = dump.as_deref_mut() {
         dump.capture(image);
     }
@@ -143,6 +142,21 @@ pub fn observe_slots_dumping(
     let narrowed = narrow_names(&mut crops);
     let detection_ms = detection_started.elapsed().as_millis() as u64;
 
+    // Health is a second look, so set its crops aside rather than read them.
+    let mut held: Vec<HeldHealth> = Vec::new();
+    for (slot_index, band, crop) in &crops {
+        if band.kind == BandKind::Health
+            && let Some(crop) = crop
+        {
+            held.push(HeldHealth {
+                row: slots[*slot_index].0 as usize,
+                band: *band,
+                crop: crop.clone(),
+            });
+        }
+    }
+    crops.retain(|(_, band, _)| band.kind == BandKind::Name);
+
     let recognition_started = Instant::now();
     let readings = recognize_all(&crops);
     let recognition_ms = recognition_started.elapsed().as_millis() as u64;
@@ -150,9 +164,10 @@ pub fn observe_slots_dumping(
     tracing::info!(
         detection_ms,
         recognition_ms,
-        crops = crops.len(),
+        names = crops.len(),
         narrowed,
-        "Read raid frame crops"
+        health_held = held.len(),
+        "Read raid frame names"
     );
 
     let mut observations = Vec::new();
@@ -236,12 +251,101 @@ pub fn observe_slots_dumping(
             }
         }
 
-        if saw_anything {
+        if saw_anything || held.iter().any(|h| h.row == observation.row) {
             observations.push(observation);
         }
     }
 
-    observations
+    Reading {
+        rows: observations,
+        held,
+    }
+}
+
+/// One pass over the frames, health prepared but not yet read.
+pub struct Reading {
+    pub rows: Vec<RowObservation>,
+    held: Vec<HeldHealth>,
+}
+
+/// A health crop prepared but not recognized.
+struct HeldHealth {
+    row: usize,
+    band: Band,
+    crop: PreparedCrop,
+}
+
+impl Reading {
+    /// Rows we could still read health for.
+    pub fn rows_with_health(&self) -> Vec<usize> {
+        self.held.iter().map(|h| h.row).collect()
+    }
+
+    /// Read health for `rows`. Crops read here are dropped, so asking twice is
+    /// free.
+    pub fn read_health(&mut self, rows: &[usize], mut dump: Option<&mut DebugDump>) -> usize {
+        let wanted: Vec<usize> = (0..self.held.len())
+            .filter(|&i| rows.contains(&self.held[i].row))
+            .collect();
+        if wanted.is_empty() {
+            return 0;
+        }
+
+        let crops: Vec<&PreparedCrop> = wanted.iter().map(|&i| &self.held[i].crop).collect();
+        let readings: Vec<Option<Result<String, engine::OcrError>>> =
+            match (engine::warm(), recognition_pool()) {
+                (Ok(()), Some(pool)) => {
+                    pool.install(|| crops.par_iter().map(|c| Some(engine::recognize(c))).collect())
+                }
+                _ => crops.iter().map(|c| Some(engine::recognize(c))).collect(),
+            };
+
+        let mut read = 0;
+        for (&i, reading) in wanted.iter().zip(readings) {
+            let held = &self.held[i];
+            let Some(row) = self.rows.iter_mut().find(|r| r.row == held.row) else {
+                continue;
+            };
+            let text = match reading {
+                Some(Ok(text)) if !text.trim().is_empty() => text,
+                other => {
+                    if let Some(dump) = dump.as_deref_mut() {
+                        let why = match other {
+                            Some(Err(e)) => format!("unreadable: {e}"),
+                            _ => "empty reading".to_string(),
+                        };
+                        dump.band(held.row as u8, &held.band, &held.crop, "", &why);
+                    }
+                    continue;
+                }
+            };
+            let (value, percent) = parse_health_text(&text);
+            if let Some(dump) = dump.as_deref_mut() {
+                let outcome = format!(
+                    "value={} percent={}",
+                    value.map_or("-".into(), |v: u32| v.to_string()),
+                    percent.map_or("-".into(), |p: u8| p.to_string())
+                );
+                dump.band(held.row as u8, &held.band, &held.crop, &text, &outcome);
+            }
+            row.hp_value = value;
+            row.hp_percent = percent;
+            read += 1;
+        }
+
+        // Drop what we read, keep the rest.
+        let mut keep = wanted.iter().peekable();
+        let mut index = 0;
+        self.held.retain(|_| {
+            let drop = keep.peek() == Some(&&index);
+            if drop {
+                keep.next();
+            }
+            index += 1;
+            !drop
+        });
+        read
+    }
 }
 
 /// `None` when the pool cannot be built.
@@ -323,14 +427,61 @@ pub fn detect(
     slots: &[SlotRect],
     candidates: &[PlayerCandidate],
 ) -> Vec<RowAssignment> {
-    let observations = observe_slots(image, slots);
+    let mut reading = observe_slots(image, slots);
     tracing::debug!(
         "Raid detection read {} of {} slots against {} candidates",
-        observations.len(),
+        reading.rows.len(),
         slots.len(),
         candidates.len()
     );
-    baras_core::raid_detect::assign_rows(&observations, candidates, &MatchConfig::default())
+    assign_with_health(&mut reading, candidates, None).0
+}
+
+/// Match on names, then re-match the unsettled rows with their health read.
+///
+/// Health is only worth its recognition pass where names could not decide: a
+/// tie between two candidates, or a name too weak to stand alone.
+pub fn assign_with_health(
+    reading: &mut Reading,
+    candidates: &[PlayerCandidate],
+    mut dump: Option<&mut DebugDump>,
+) -> (Vec<RowAssignment>, Vec<RowDecision>) {
+    let config = MatchConfig::default();
+    let (assignments, decisions) = assign_rows_explained(&reading.rows, candidates, &config);
+
+    let retry = rows_needing_health(&decisions, &config);
+    if retry.is_empty() {
+        return (assignments, decisions);
+    }
+
+    let read = reading.read_health(&retry, dump.as_deref_mut());
+    tracing::info!(rows = retry.len(), read, "Re-read health for undecided rows");
+    if read == 0 {
+        return (assignments, decisions);
+    }
+
+    assign_rows_explained(
+        &reading.rows,
+        candidates,
+        &config.clone().with_health_rescue(),
+    )
+}
+
+/// Rows a second signal could still settle.
+fn rows_needing_health(decisions: &[RowDecision], config: &MatchConfig) -> Vec<usize> {
+    decisions
+        .iter()
+        .filter(|d| {
+            let Some(best) = d.best.as_ref() else {
+                return false;
+            };
+            // Two candidates within the margin, or one that almost cleared the bar.
+            best.total - d.runner_up < config.min_margin
+                || (best.name_score >= HEALTH_RESCUE_FLOOR
+                    && best.name_score < config.min_confidence)
+        })
+        .map(|d| d.row)
+        .collect()
 }
 
 #[cfg(test)]

@@ -39,6 +39,8 @@ pub struct MatchConfig {
     pub name_weight: f32,
     pub hp_value_weight: f32,
     pub hp_percent_weight: f32,
+    /// Weakest name health may still be counted for. `None` bars it entirely.
+    pub health_rescue_floor: Option<f32>,
 }
 
 impl Default for MatchConfig {
@@ -50,9 +52,24 @@ impl Default for MatchConfig {
             name_weight: 1.0,
             hp_value_weight: 0.9,
             hp_percent_weight: 0.25,
+            health_rescue_floor: None,
         }
     }
 }
+
+impl MatchConfig {
+    /// For the retry. The blend still has to clear `min_confidence`, so this
+    /// widens what health is considered for, not what gets assigned.
+    pub fn with_health_rescue(self) -> Self {
+        Self {
+            health_rescue_floor: Some(HEALTH_RESCUE_FLOOR),
+            ..self
+        }
+    }
+}
+
+/// Weakest name a second look at health may act on.
+pub const HEALTH_RESCUE_FLOOR: f32 = 0.45;
 
 /// Health below this score is too weak to be useful.
 const STRONG_HEALTH: f32 = 0.75;
@@ -178,8 +195,8 @@ fn score_parts(
     parts.name_score = name_score;
 
     // Health is supporting evidence, never identity. It cannot rescue a name
-    // that is too weak to stand on its own.
-    if name_score < config.min_confidence {
+    // that is too weak to stand on its own, unless a retry lowered the floor.
+    if name_score < config.health_rescue_floor.unwrap_or(config.min_confidence) {
         return parts;
     }
 
