@@ -29,3 +29,6 @@ chrono = "0.4.42"
 
 # Make sure we can have multiple crops 'in flight'
 rayon = "1"
+
+# Lanczos-3 upscaling of the crops.
+fast_image_resize = "6"
