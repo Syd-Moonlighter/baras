@@ -464,6 +464,7 @@ impl ServiceHandle {
     pub async fn apply_raid_detection(
         &self,
         assignments: Vec<baras_core::raid_detect::RowAssignment>,
+        ambiguous_rows: &[u8],
     ) -> usize {
         let remaining = {
             let mut registry = self
@@ -473,7 +474,15 @@ impl ServiceHandle {
                 .unwrap_or_else(|p| p.into_inner());
             // The screen is the authority: players the pass did not
             // re-confirm are evicted before the confirmed ones are placed.
-            let confirmed: Vec<i64> = assignments.iter().map(|a| a.entity_id).collect();
+            // An ambiguous row is the exception — it read something that
+            // fits its occupant among others, and absence of a verdict is
+            // not evidence of absence, so the occupant is the tiebreak.
+            let mut confirmed: Vec<i64> = assignments.iter().map(|a| a.entity_id).collect();
+            confirmed.extend(
+                ambiguous_rows
+                    .iter()
+                    .filter_map(|&row| registry.get_player(row).map(|p| p.entity_id)),
+            );
             registry.retain_players(&confirmed);
             registry.assign_slots(
                 assignments

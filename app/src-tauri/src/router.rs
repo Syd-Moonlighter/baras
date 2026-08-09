@@ -333,10 +333,20 @@ async fn detect_raid_names(
         return;
     }
 
+    // Lookalikes need a human: their slots pulse, and their occupants are
+    // exempt from eviction below.
+    let ambiguous: Vec<u8> = decisions
+        .iter()
+        .filter(|d| d.rejected == Some(baras_core::raid_detect::Rejection::Ambiguous))
+        .filter_map(|d| u8::try_from(d.row).ok())
+        .collect();
+
     // Applied even with zero matches: a pass that read names is authoritative,
     // and inside it evicts registered players it no longer saw.
     let matched = assignments.len();
-    let _ = service_handle.apply_raid_detection(assignments).await;
+    let _ = service_handle
+        .apply_raid_detection(assignments, &ambiguous)
+        .await;
     let (pending, _) = service_handle.apply_provisional_raid_detection(names).await;
     let elapsed_ms = started_at.elapsed().as_millis() as u64;
 
@@ -349,12 +359,6 @@ async fn detect_raid_names(
         "Raid name detection complete"
     );
 
-    // Lookalikes need a human, so mark them for the overlay to pulse.
-    let ambiguous: Vec<u8> = decisions
-        .iter()
-        .filter(|d| d.rejected == Some(baras_core::raid_detect::Rejection::Ambiguous))
-        .filter_map(|d| u8::try_from(d.row).ok())
-        .collect();
     let ambiguous_count = ambiguous.len();
     service_handle.set_ambiguous_slots(ambiguous).await;
 
