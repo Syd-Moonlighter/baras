@@ -70,6 +70,24 @@ pub(crate) async fn raid_detection_candidates(
             );
         }
     }
+    // Ability-cast targets that never entered combat exist only in this
+    // roster. Observed after the discipline roster so their empty health
+    // reading never shadows a real one.
+    {
+        let mut roster = shared
+            .ability_roster
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        roster.expire_before(cutoff);
+        for candidate in roster.candidates() {
+            set.observe_raw(
+                candidate.entity_id,
+                &candidate.name,
+                (candidate.current_hp, candidate.max_hp),
+                candidate.last_seen,
+            );
+        }
+    }
     set.candidates()
 }
 

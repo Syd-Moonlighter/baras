@@ -136,6 +136,11 @@ pub struct SharedState {
     pub is_live_tailing: AtomicBool,
     /// Raid frame slot assignments (persists player positions)
     pub raid_registry: Mutex<RaidSlotRegistry>,
+    /// Players registered from ability casts, kept as OCR candidates.
+    /// `player_disciplines` only learns a player on DisciplineChanged (entering
+    /// combat), so pre-combat HOT/buff targets live only here — without this,
+    /// clearing the frames makes them unmatchable until their next combat.
+    pub ability_roster: Mutex<baras_core::raid_detect::CandidateSet>,
     /// A player was registered since the provisional slots were last matched.
     pub roster_changed: AtomicBool,
     /// Current area ID for lazy loading timers (0 = unknown)
@@ -191,6 +196,7 @@ impl SharedState {
             watching: AtomicBool::new(false),
             is_live_tailing: AtomicBool::new(true), // Start in live tailing mode
             raid_registry: Mutex::new(RaidSlotRegistry::new(raid_slots)),
+            ability_roster: Mutex::new(baras_core::raid_detect::CandidateSet::new()),
             roster_changed: AtomicBool::new(false),
             current_area_id: AtomicI64::new(0),
             last_player_id: AtomicI64::new(0),

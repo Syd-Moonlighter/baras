@@ -1944,6 +1944,9 @@ impl CombatService {
 
         // Clear raid registry when switching files (new session = fresh state)
         self.shared.raid_registry.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        // Entity ids do not survive a session change, so neither can the
+        // ability-cast roster (a user frame clear deliberately keeps it).
+        self.shared.ability_roster.lock().unwrap_or_else(|p| p.into_inner()).clear();
 
         // Create trigger channel for signal-driven metrics updates (tokio channel - no spawn_blocking needed)
         let (trigger_tx, mut trigger_rx) = mpsc::channel::<MetricsTrigger>(8);
@@ -3344,12 +3347,25 @@ async fn build_raid_frame_data(
 
     // Process new targets queue - these are entities that JUST received an effect from local player
     // The registry handles duplicate rejection via try_register
-    for target in tracker.take_new_targets() {
-        let name = resolve(target.name).to_string();
-        // A new player is the only thing that can settle a provisional slot, so
-        // it is what schedules the match rather than a timer.
-        if registry.try_register(target.entity_id, name).is_some() {
-            shared.roster_changed.store(true, Ordering::Relaxed);
+    let new_targets = tracker.take_new_targets();
+    if !new_targets.is_empty() {
+        // Remember these players past a frame clear: a re-run OCR pass can
+        // only rebind names it still has candidates for, and out-of-combat
+        // targets never reach the discipline roster.
+        let mut roster = shared
+            .ability_roster
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for target in new_targets {
+            let name = resolve(target.name).to_string();
+            if let Some(at) = session.last_event_time {
+                roster.observe_raw(target.entity_id, &name, (0, 0), at);
+            }
+            // A new player is the only thing that can settle a provisional slot, so
+            // it is what schedules the match rather than a timer.
+            if registry.try_register(target.entity_id, name).is_some() {
+                shared.roster_changed.store(true, Ordering::Relaxed);
+            }
         }
     }
 
