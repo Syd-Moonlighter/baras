@@ -2830,20 +2830,6 @@ pub fn SettingsPanel(
                             }
                             p { class: "hint", "Display ability icons instead of colored squares (requires icon pack)" }
 
-                            div { class: "setting-row",
-                                label { "Save OCR Debug Images" }
-                                input {
-                                    r#type: "checkbox",
-                                    checked: current_settings.raid_overlay.ocr_debug_dump,
-                                    onchange: move |e: Event<FormData>| {
-                                        let mut new_settings = draft_settings();
-                                        new_settings.raid_overlay.ocr_debug_dump = e.checked();
-                                        update_draft(new_settings);
-                                    }
-                                }
-                            }
-                            p { class: "hint", "Writes what name detection saw to baras/ocr-debug for troubleshooting misread names. Leave off for normal play." }
-
                             div { class: "setting-row reset-row",
                                 button {
                                     class: "btn btn-reset",

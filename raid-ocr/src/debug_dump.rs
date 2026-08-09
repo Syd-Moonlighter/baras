@@ -14,15 +14,59 @@ use std::path::{Path, PathBuf};
 use baras_overlay::capture::CapturedImage;
 use crate::analysis::{Band, BandKind, PreparedCrop};
 
+/// Root of the dump tree: `<config>/baras/ocr-debug/`.
+fn dump_root() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("baras").join("ocr-debug"))
+}
+
 /// Where dumps are written: `<config>/baras/ocr-debug/<timestamp>/`.
 fn session_dir() -> Option<PathBuf> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%.3f").to_string();
-    let dir = dirs::config_dir()?
-        .join("baras")
-        .join("ocr-debug")
-        .join(stamp);
+    let dir = dump_root()?.join(stamp);
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir)
+}
+
+/// Delete the oldest dumps until the tree fits in `max_mb`.
+///
+/// Checked only when a new dump is about to be written, so leaving the option
+/// on costs nothing on a pass that is not dumping.
+fn prune(max_mb: u32) {
+    let Some(root) = dump_root() else { return };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+
+    // Timestamped names sort oldest-first, and cost nothing to read.
+    let mut dumps: Vec<(PathBuf, u64)> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| {
+            let size = std::fs::read_dir(e.path())
+                .map(|files| {
+                    files
+                        .flatten()
+                        .filter_map(|f| f.metadata().ok())
+                        .map(|m| m.len())
+                        .sum()
+                })
+                .unwrap_or(0);
+            (e.path(), size)
+        })
+        .collect();
+    dumps.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let budget = u64::from(max_mb) * 1024 * 1024;
+    let mut total: u64 = dumps.iter().map(|(_, size)| size).sum();
+    for (path, size) in &dumps {
+        if total <= budget {
+            break;
+        }
+        if std::fs::remove_dir_all(path).is_ok() {
+            total = total.saturating_sub(*size);
+            tracing::debug!("Pruned OCR debug dump {path:?}");
+        }
+    }
 }
 
 /// One detection pass worth of images and readings.
@@ -33,7 +77,11 @@ pub struct DebugDump {
 
 impl DebugDump {
     /// Create a dump directory for this pass, or `None` if it cannot be made.
-    pub fn new(slot_count: usize) -> Option<Self> {
+    ///
+    /// Prunes to `max_mb` first, so the tree is capped by what is about to be
+    /// added rather than growing until someone notices.
+    pub fn new(slot_count: usize, max_mb: u32) -> Option<Self> {
+        prune(max_mb);
         let dir = session_dir()?;
         let mut notes = String::new();
         let _ = writeln!(notes, "BARAS raid OCR debug dump");

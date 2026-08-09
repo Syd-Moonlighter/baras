@@ -86,6 +86,8 @@ pub fn App() -> Element {
     let mut upload_status = use_signal(HashMap::<String, (bool, String)>::new); // path -> (success, message)
     let mut file_browser_filter = use_signal(String::new);
     let mut hide_small_log_files = use_signal(|| true);
+    let mut ocr_debug_dump = use_signal(|| true);
+    let mut ocr_debug_max_mb = use_signal(|| 100u32);
 
     // UI Session State - unified state that persists across tab switches
     let mut ui_state = use_signal(UiSessionState::default);
@@ -189,6 +191,8 @@ pub fn App() -> Element {
             auto_delete_old.set(config.auto_delete_old_files);
             retention_days.set(config.log_retention_days);
             hide_small_log_files.set(config.hide_small_log_files);
+            ocr_debug_dump.set(config.ocr_debug_dump);
+            ocr_debug_max_mb.set(config.ocr_debug_max_mb);
             minimize_to_tray.set(config.minimize_to_tray);
             european_number_format.set(config.european_number_format);
             parsely_username.set(config.parsely.username);
@@ -2006,6 +2010,56 @@ pub fn App() -> Element {
                             }
 
                             div { class: "settings-section",
+                                h4 { "Name Detection" }
+                                div { class: "setting-row",
+                                    label { "Save detection images" }
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: ocr_debug_dump(),
+                                        onchange: move |e| {
+                                            let checked = e.checked();
+                                            ocr_debug_dump.set(checked);
+                                            let mut toast = use_toast();
+                                            spawn(async move {
+                                                if let Some(mut cfg) = api::get_config().await {
+                                                    cfg.ocr_debug_dump = checked;
+                                                    if let Err(err) = api::update_config(&cfg).await {
+                                                        toast.show(format!("Failed to save settings: {}", err), ToastSeverity::Normal);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                p { class: "hint", "Writes what name detection saw to baras/ocr-debug, so a misread name can be diagnosed from the images rather than guessed at." }
+                                div { class: "setting-row",
+                                    label { "Keep at most (MB)" }
+                                    input {
+                                        r#type: "number",
+                                        min: "10",
+                                        max: "10000",
+                                        step: "10",
+                                        value: "{ocr_debug_max_mb()}",
+                                        onchange: move |e| {
+                                            let Ok(mb) = e.value().parse::<u32>() else { return };
+                                            let mb = mb.clamp(10, 10_000);
+                                            ocr_debug_max_mb.set(mb);
+                                            let mut toast = use_toast();
+                                            spawn(async move {
+                                                if let Some(mut cfg) = api::get_config().await {
+                                                    cfg.ocr_debug_max_mb = mb;
+                                                    if let Err(err) = api::update_config(&cfg).await {
+                                                        toast.show(format!("Failed to save settings: {}", err), ToastSeverity::Normal);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                p { class: "hint", "The oldest images are deleted before each new detection, so the folder never grows past this." }
+                            }
+
+                            div { class: "settings-section",
                                 h4 { "Global Hotkeys" }
                                 p { class: "hint", "Click to capture a key combination. Backspace to clear." }
                                 p { class: "hint hint-warning",
@@ -2046,17 +2100,17 @@ pub fn App() -> Element {
                                         }
                                     }
                                     div { class: "setting-row",
-                                        label { "Go Live" }
-                                        HotkeyInput {
-                                            value: hotkey_live_mode(),
-                                            on_change: move |v| hotkey_live_mode.set(v),
-                                        }
-                                    }
-                                    div { class: "setting-row",
                                         label { "Detect Raid Names" }
                                         HotkeyInput {
                                             value: hotkey_detect_raid(),
                                             on_change: move |v| hotkey_detect_raid.set(v),
+                                        }
+                                    }
+                                    div { class: "setting-row",
+                                        label { "Go Live" }
+                                        HotkeyInput {
+                                            value: hotkey_live_mode(),
+                                            on_change: move |v| hotkey_live_mode.set(v),
                                         }
                                     }
                                 }

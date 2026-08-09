@@ -2062,10 +2062,6 @@ pub struct RaidOverlaySettings {
     pub show_effect_icons: bool,
     #[serde(default = "default_frame_spacing")]
     pub frame_spacing: f32,
-    /// Write the crops handed to OCR, and what came back, to disk on every
-    /// detection. Diagnostic only.
-    #[serde(default)]
-    pub ocr_debug_dump: bool,
 }
 
 fn default_grid_columns() -> u8 {
@@ -2107,7 +2103,6 @@ impl Default for RaidOverlaySettings {
             effect_fill_opacity: 255,
             show_effect_icons: false,
             frame_spacing: 4.0,
-            ocr_debug_dump: false,
         }
     }
 }
@@ -3279,6 +3274,20 @@ pub struct AppConfig {
     /// Keys are role names: "Tank", "Healer", "Dps".
     #[serde(default)]
     pub default_profile_per_role: std::collections::HashMap<String, String>,
+
+    /// Write the crops handed to OCR, and what came back, to disk on every
+    /// detection. On by default: it is what makes a bad reading diagnosable.
+    #[serde(default = "default_true")]
+    pub ocr_debug_dump: bool,
+
+    /// Cap on the dump directory. The oldest dumps are pruned before a new one
+    /// is written, so leaving the option on cannot fill a disk.
+    #[serde(default = "default_ocr_debug_max_mb")]
+    pub ocr_debug_max_mb: u32,
+}
+
+fn default_ocr_debug_max_mb() -> u32 {
+    100
 }
 
 fn default_retention_days() -> u32 {
@@ -3319,6 +3328,8 @@ impl AppConfig {
             european_number_format: false,
             data_explorer_auto_live: false,
             default_profile_per_role: std::collections::HashMap::new(),
+            ocr_debug_dump: true,
+            ocr_debug_max_mb: 100,
         }
     }
 }
