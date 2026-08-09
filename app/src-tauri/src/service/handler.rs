@@ -67,8 +67,7 @@ pub(crate) async fn raid_detection_candidates(
     let mut set = CandidateSet::new();
     let area_started = cache.current_area.entered_at;
     for player in cache.player_disciplines.values() {
-        // Activity, not roster membership.
-        let Some(last_seen) = player.last_activity_at.or(player.last_seen_at) else {
+        let Some(last_seen) = player.last_seen_at else {
             continue;
         };
         if area_started.is_some_and(|started| last_seen < started) {

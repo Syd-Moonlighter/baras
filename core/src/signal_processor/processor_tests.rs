@@ -166,7 +166,10 @@ fn discipline_batch_does_not_choose_the_local_player_by_order() {
     processor.process_event(event, &mut cache);
     let remote = &cache.player_disciplines[&REMOTE_ID];
     assert_eq!((remote.current_hp, remote.max_hp), (400_000, 485_275));
-    assert_eq!(remote.last_seen_at, roster_seen_at);
+    assert!(
+        remote.last_seen_at > roster_seen_at,
+        "a health-bearing event should refresh roster freshness"
+    );
 }
 
 #[test]

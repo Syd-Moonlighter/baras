@@ -266,15 +266,14 @@ impl EventProcessor {
         player.received_revive_immunity = false;
         player.current_target_id = 0;
         player.last_seen_at = Some(event.timestamp);
-        player.last_activity_at = Some(event.timestamp);
         if event.source_entity.health.1 > 0 {
             player.current_hp = event.source_entity.health.0;
             player.max_hp = event.source_entity.health.1;
         }
     }
 
-    /// Keep roster health as fresh as the log permits without changing roster
-    /// membership. `last_seen_at` deliberately remains the discipline timestamp.
+    /// Keep roster health and freshness current without changing roster
+    /// membership: only events carrying a real health payload count.
     fn update_registered_player_health(&self, event: &CombatEvent, cache: &mut SessionCache) {
         for entity in [&event.source_entity, &event.target_entity] {
             if entity.entity_type != EntityType::Player || entity.health.1 <= 0 {
@@ -283,7 +282,7 @@ impl EventProcessor {
             if let Some(player) = cache.player_disciplines.get_mut(&entity.log_id) {
                 player.current_hp = entity.health.0;
                 player.max_hp = entity.health.1;
-                player.last_activity_at = Some(event.timestamp);
+                player.last_seen_at = Some(event.timestamp);
             }
         }
     }

@@ -53,8 +53,6 @@ pub struct WorkerPlayerDiscipline {
     #[serde(default)]
     pub last_seen_at: Option<NaiveDateTime>,
     #[serde(default)]
-    pub last_activity_at: Option<NaiveDateTime>,
-    #[serde(default)]
     pub current_hp: i32,
     #[serde(default)]
     pub max_hp: i32,
@@ -71,7 +69,6 @@ impl WorkerPlayerDiscipline {
             discipline_id: player.discipline_id,
             discipline_name: player.discipline_name.clone(),
             last_seen_at: player.last_seen_at,
-            last_activity_at: player.last_activity_at,
             current_hp: player.current_hp,
             max_hp: player.max_hp,
         }
@@ -91,7 +88,6 @@ impl WorkerPlayerDiscipline {
             received_revive_immunity: false,
             current_target_id: 0,
             last_seen_at: self.last_seen_at,
-            last_activity_at: self.last_activity_at,
             current_hp: self.current_hp,
             max_hp: self.max_hp,
         }
