@@ -25,10 +25,11 @@ use crate::state::SharedState;
 /// How far back in log time a player may have been seen and still be offered to
 /// the matcher.
 ///
-/// Log time against log time — freshness never consults the wall clock. Ten
-/// minutes keeps a group member who is merely idle and drops one who left a
-/// while ago; each stale name is a chance for a row to match the wrong player.
-const OCR_ROSTER_WINDOW_MINUTES: i64 = 10;
+/// Log time against log time — freshness never consults the wall clock. Wide
+/// enough to survive a break or a long AFK, narrow enough to shed players who
+/// left the group hours into a session; each stale name is a chance for a row
+/// to match the wrong player.
+const OCR_ROSTER_WINDOW_MINUTES: i64 = 30;
 
 /// Current-area roster for OCR. Names identify and health only supports.
 ///
