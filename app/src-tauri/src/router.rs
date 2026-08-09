@@ -234,9 +234,20 @@ async fn detect_raid_names(
 ) {
     let candidates = service_handle.raid_detection_candidates().await;
 
+    // The first press ever downloads the models; without a word about it,
+    // the wait reads as a hang and the failure as a broken feature.
+    let downloading = !baras_raid_ocr::engine::model_is_present();
+    if downloading {
+        let _ = result_tx.send("Downloading OCR models (first run)...".into());
+    }
     if let Err(e) = baras_raid_ocr::engine::ensure_model().await {
         tracing::warn!("Raid name detection unavailable: {e}");
-        let _ = result_tx.send("OCR unavailable: assign names manually".into());
+        let message = if downloading {
+            "Model download failed: check connection and try again"
+        } else {
+            "OCR unavailable: assign names manually"
+        };
+        let _ = result_tx.send(message.into());
         return;
     }
 

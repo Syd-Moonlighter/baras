@@ -594,6 +594,9 @@ pub struct RaidOverlay {
     /// Pending registry actions to be sent to the service
     pending_registry_actions: Vec<RaidRegistryAction>,
     detection_result_rx: Option<std::sync::mpsc::Receiver<String>>,
+    /// Whether the current run has reported anything yet, so a sender that
+    /// dies silently can be told apart from one that finished.
+    detection_result_seen: bool,
     detection_message: Option<(String, Instant)>,
     european_number_format: bool,
 }
@@ -627,6 +630,7 @@ impl RaidOverlay {
             last_render: Instant::now() - RENDER_INTERVAL, // Allow immediate first render
             pending_registry_actions: Vec::new(),
             detection_result_rx: None,
+            detection_result_seen: false,
             detection_message: None,
             european_number_format: false,
         };
@@ -887,6 +891,7 @@ impl RaidOverlay {
 
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         self.detection_result_rx = Some(result_rx);
+        self.detection_result_seen = false;
         self.set_detection_message("Reading raid frames...".into());
         self.pending_registry_actions.push(RaidRegistryAction::DetectNames {
             started_at,
@@ -1693,20 +1698,24 @@ impl Overlay for RaidOverlay {
             return false;
         }
 
-        let detection_result = self
-            .detection_result_rx
-            .as_ref()
-            .and_then(|rx| match rx.try_recv() {
-                Ok(message) => Some(message),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    Some("Detection stopped: assign names manually".into())
+        // Progress messages arrive mid-run ("Downloading OCR models..."), so
+        // a message does not end the run — the sender dropping does.
+        while let Some(rx) = self.detection_result_rx.as_ref() {
+            match rx.try_recv() {
+                Ok(message) => {
+                    self.detection_result_seen = true;
+                    self.set_detection_message(message);
                 }
-            });
-        if let Some(message) = detection_result {
-            self.detection_result_rx = None;
-            self.set_detection_message(message);
-        } else if self.detection_result_rx.is_none()
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    if !self.detection_result_seen {
+                        self.set_detection_message("Detection stopped: assign names manually".into());
+                    }
+                    self.detection_result_rx = None;
+                }
+            }
+        }
+        if self.detection_result_rx.is_none()
             && self
                 .detection_message
                 .as_ref()
