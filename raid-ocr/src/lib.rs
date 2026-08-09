@@ -94,13 +94,20 @@ pub fn observe_slots_dumping(
     let mut slot_images = Vec::with_capacity(slots.len());
     let mut bars: Vec<Option<BarPosition>> = Vec::with_capacity(slots.len());
 
+    // Kept before reconciliation borrows positions: a bar that was actually
+    // there is half of what says a frame exists.
+    let mut bar_seen: Vec<bool> = Vec::with_capacity(slots.len());
+
     for &(_, x, y, w, h) in slots {
         match image.crop(x, y, w, h) {
             Some(slot_image) => {
-                bars.push(detect_health_bar(&slot_image));
+                let bar = detect_health_bar(&slot_image);
+                bar_seen.push(bar.is_some());
+                bars.push(bar);
                 slot_images.push(Some(slot_image));
             }
             None => {
+                bar_seen.push(false);
                 bars.push(None);
                 slot_images.push(None);
             }
@@ -139,7 +146,7 @@ pub fn observe_slots_dumping(
     }
 
     let detection_started = Instant::now();
-    let narrowed = narrow_names(&mut crops);
+    let (narrowed, textless) = narrow_names(&mut crops);
     let detection_ms = detection_started.elapsed().as_millis() as u64;
 
     // Health is a second look, so set its crops aside rather than read them.
@@ -171,6 +178,7 @@ pub fn observe_slots_dumping(
     );
 
     let mut observations = Vec::new();
+    let mut states: Vec<(u8, SlotState)> = Vec::with_capacity(slots.len());
     let mut next = 0;
 
     for ((slot_index, slot_rect), slot_bands) in slots.iter().enumerate().zip(&per_slot_bands) {
@@ -251,13 +259,31 @@ pub fn observe_slots_dumping(
             }
         }
 
+        // Neither a bar nor any text means no frame, not a failed reading.
+        let state = if observation.name_text.is_some() {
+            SlotState::Read
+        } else if !bar_seen[slot_index] && textless.contains(&slot_index) {
+            SlotState::Empty
+        } else {
+            SlotState::Unreadable
+        };
+        states.push((slot_rect.0, state));
+
         if saw_anything || held.iter().any(|h| h.row == observation.row) {
             observations.push(observation);
         }
     }
 
+    tracing::info!(
+        read = states.iter().filter(|(_, s)| *s == SlotState::Read).count(),
+        unreadable = states.iter().filter(|(_, s)| *s == SlotState::Unreadable).count(),
+        empty = states.iter().filter(|(_, s)| *s == SlotState::Empty).count(),
+        "Raid frame slots"
+    );
+
     Reading {
         rows: observations,
+        states,
         held,
     }
 }
@@ -265,7 +291,42 @@ pub fn observe_slots_dumping(
 /// One pass over the frames, health prepared but not yet read.
 pub struct Reading {
     pub rows: Vec<RowObservation>,
+    /// What each slot turned out to hold, in slot order.
+    pub states: Vec<(u8, SlotState)>,
     held: Vec<HeldHealth>,
+}
+
+/// What a slot turned out to hold.
+///
+/// A slot with neither a health bar nor any text is an empty frame, not a
+/// failed reading — telling a user we could not read four names when the group
+/// is four players short is wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotState {
+    /// A name was read.
+    Read,
+    /// A frame is there, the name is not legible.
+    Unreadable,
+    /// No frame here.
+    Empty,
+}
+
+impl Reading {
+    /// Slots holding no frame at all.
+    pub fn empty_slots(&self) -> usize {
+        self.states
+            .iter()
+            .filter(|(_, s)| *s == SlotState::Empty)
+            .count()
+    }
+
+    /// Slots holding a frame we could not read a name from.
+    pub fn unreadable_slots(&self) -> usize {
+        self.states
+            .iter()
+            .filter(|(_, s)| *s == SlotState::Unreadable)
+            .count()
+    }
 }
 
 /// A health crop prepared but not recognized.
@@ -366,10 +427,10 @@ fn recognition_pool() -> Option<&'static rayon::ThreadPool> {
 /// Narrow name crops to the columns detection finds text in, dropping those
 /// with none. Health digits sit on the bar, already bounded, so they are left.
 ///
-/// Returns how many crops changed, for the log.
-fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> usize {
+/// Returns how many crops changed, and the slots detection found no text in.
+fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> (usize, Vec<usize>) {
     if engine::warm().is_err() {
-        return 0;
+        return (0, Vec::new());
     }
 
     // Which entries to ask about, and the crops themselves. Detection packs
@@ -386,6 +447,7 @@ fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> usize {
         .collect();
 
     let mut changed = 0;
+    let mut textless = Vec::new();
     for (&i, span) in asked.iter().zip(engine::text_spans(&batch)) {
         match span {
             Some(Some((left, right))) => {
@@ -397,13 +459,14 @@ fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> usize {
             // No text anywhere in the crop: an empty frame.
             Some(None) => {
                 crops[i].2 = None;
+                textless.push(crops[i].0);
                 changed += 1;
             }
             // Undecided; keep the crop whole rather than lose the slot.
             None => {}
         }
     }
-    changed
+    (changed, textless)
 }
 
 /// Reads every crop. Lines up with `crops`, `None` where there was nothing to read.

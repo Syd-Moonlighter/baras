@@ -5,6 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
+/// Fights a provisional name may go unclaimed before it is dropped.
+const PROVISIONAL_MAX_FIGHTS: u8 = 3;
+
 /// Information about a player registered in the raid frame
 #[derive(Debug, Clone)]
 pub struct RegisteredPlayer {
@@ -41,6 +44,8 @@ pub struct RaidSlotRegistry {
     slots: HashMap<u8, RegisteredPlayer>,
     /// Names read before a combat-log roster is available.
     provisional_slots: HashMap<u8, String>,
+    /// Fights each provisional name has survived without being claimed.
+    provisional_age: HashMap<u8, u8>,
     /// Reverse lookup: entity_id → slot
     entity_to_slot: HashMap<i64, u8>,
     /// Maximum number of slots (configurable, default 8)
@@ -56,6 +61,7 @@ impl RaidSlotRegistry {
         Self {
             slots: HashMap::new(),
             provisional_slots: HashMap::new(),
+            provisional_age: HashMap::new(),
             entity_to_slot: HashMap::new(),
             max_slots,
             pending_disciplines: HashMap::new(),
@@ -281,6 +287,22 @@ impl RaidSlotRegistry {
 
     pub fn provisional_len(&self) -> usize {
         self.provisional_slots.len()
+    }
+
+    /// Age every provisional name by one fight, dropping those never claimed.
+    ///
+    /// A misread matching nobody would otherwise hold its slot for the session
+    /// and keep the real player out of it.
+    pub fn age_provisional_slots(&mut self) -> usize {
+        let age = &mut self.provisional_age;
+        let before = self.provisional_slots.len();
+        self.provisional_slots.retain(|slot, _| {
+            let fights = age.entry(*slot).or_insert(0);
+            *fights += 1;
+            *fights <= PROVISIONAL_MAX_FIGHTS
+        });
+        age.retain(|slot, _| self.provisional_slots.contains_key(slot));
+        before - self.provisional_slots.len()
     }
 
     pub fn registered_len(&self) -> usize {

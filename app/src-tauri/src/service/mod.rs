@@ -497,13 +497,19 @@ impl SignalHandler for CombatSignalHandler {
                 self.shared.in_combat.store(true, Ordering::SeqCst);
                 let _ = self.trigger_tx.try_send(MetricsTrigger::CombatStarted);
                 let _ = self.session_event_tx.send(SessionEvent::CombatStarted);
-                let should_rematch = self.shared.is_live_tailing.load(Ordering::SeqCst)
-                    && self
+                let should_rematch = self.shared.is_live_tailing.load(Ordering::SeqCst) && {
+                    let mut registry = self
                         .shared
                         .raid_registry
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .has_provisional();
+                        .unwrap_or_else(|p| p.into_inner());
+                    // A fight is the unit a provisional gets to prove itself in.
+                    let dropped = registry.age_provisional_slots();
+                    if dropped > 0 {
+                        info!("Dropped {dropped} provisional names never claimed by a player");
+                    }
+                    registry.has_provisional()
+                };
                 if should_rematch {
                     let overlay_tx = self.overlay_tx.clone();
                     tokio::spawn(async move {
