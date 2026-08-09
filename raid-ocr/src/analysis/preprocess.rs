@@ -10,9 +10,10 @@ use baras_overlay::capture::CapturedImage;
 
 use super::bands::{Band, BandKind, name_text_span};
 
-/// Target height for a preprocessed crop. Matches what ocrs' recognition model
-/// is trained on; wider or narrower is fine, shorter is not.
-const TARGET_HEIGHT: u32 = 32;
+/// Target height for a preprocessed crop: the recognition model's input height.
+/// Land on it exactly and ocrs resamples nothing; miss it and ocrs rescales on
+/// top of our own, through whatever height we stopped at.
+const TARGET_HEIGHT: u32 = 64;
 /// Vertical padding for small band-position errors.
 const PAD_Y: i32 = 2;
 
@@ -25,6 +26,29 @@ pub struct PreparedCrop {
 }
 
 impl PreparedCrop {
+    /// Narrow to a column span, pixels within it unchanged.
+    ///
+    /// `None` when the span is empty or changes nothing: recognition rescales
+    /// to the model's width, so even a one-column trim shifts every glyph.
+    pub fn narrowed(&self, left: u32, right: u32) -> Option<PreparedCrop> {
+        let right = right.min(self.width);
+        if right <= left || (left == 0 && right == self.width) {
+            return None;
+        }
+
+        let width = right - left;
+        let mut gray = Vec::with_capacity((width * self.height) as usize);
+        for y in 0..self.height {
+            let row = (y * self.width) as usize;
+            gray.extend_from_slice(&self.gray[row + left as usize..row + right as usize]);
+        }
+        Some(PreparedCrop {
+            width,
+            height: self.height,
+            gray,
+        })
+    }
+
     /// Expand to RGB, which is what `ocrs` accepts as input.
     pub fn to_rgb(&self) -> Vec<u8> {
         let mut rgb = Vec::with_capacity(self.gray.len() * 3);
@@ -288,8 +312,8 @@ mod tests {
         };
 
         let crop = prepare(&slot, &band).expect("band lies inside the slot");
-        // The 10 px source crop becomes 32 px high, so width scales by 3.2.
-        assert_eq!(crop.width, 240);
+        // The 10 px source crop becomes 64 px high, so width scales by 6.4.
+        assert_eq!(crop.width, 480);
     }
 
     #[test]

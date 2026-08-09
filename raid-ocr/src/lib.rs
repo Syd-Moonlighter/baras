@@ -11,6 +11,7 @@ pub mod engine;
 pub use debug_dump::DebugDump;
 
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use rayon::prelude::*;
 
@@ -138,7 +139,21 @@ pub fn observe_slots_dumping(
         }
     }
 
+    let detection_started = Instant::now();
+    let narrowed = narrow_names(&mut crops);
+    let detection_ms = detection_started.elapsed().as_millis() as u64;
+
+    let recognition_started = Instant::now();
     let readings = recognize_all(&crops);
+    let recognition_ms = recognition_started.elapsed().as_millis() as u64;
+
+    tracing::info!(
+        detection_ms,
+        recognition_ms,
+        crops = crops.len(),
+        narrowed,
+        "Read raid frame crops"
+    );
 
     let mut observations = Vec::new();
     let mut next = 0;
@@ -242,6 +257,49 @@ fn recognition_pool() -> Option<&'static rayon::ThreadPool> {
             .ok()
     })
     .as_ref()
+}
+
+/// Narrow name crops to the columns detection finds text in, dropping those
+/// with none. Health digits sit on the bar, already bounded, so they are left.
+///
+/// Returns how many crops changed, for the log.
+fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> usize {
+    if engine::warm().is_err() {
+        return 0;
+    }
+
+    // Which entries to ask about, and the crops themselves. Detection packs
+    // them onto one canvas, so they go in together rather than one per thread.
+    let asked: Vec<usize> = crops
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.1.kind == BandKind::Name && e.2.is_some())
+        .map(|(i, _)| i)
+        .collect();
+    let batch: Vec<&PreparedCrop> = asked
+        .iter()
+        .filter_map(|&i| crops[i].2.as_ref())
+        .collect();
+
+    let mut changed = 0;
+    for (&i, span) in asked.iter().zip(engine::text_spans(&batch)) {
+        match span {
+            Some(Some((left, right))) => {
+                if let Some(crop) = crops[i].2.as_ref().and_then(|c| c.narrowed(left, right)) {
+                    crops[i].2 = Some(crop);
+                    changed += 1;
+                }
+            }
+            // No text anywhere in the crop: an empty frame.
+            Some(None) => {
+                crops[i].2 = None;
+                changed += 1;
+            }
+            // Undecided; keep the crop whole rather than lose the slot.
+            None => {}
+        }
+    }
+    changed
 }
 
 /// Reads every crop. Lines up with `crops`, `None` where there was nothing to read.
