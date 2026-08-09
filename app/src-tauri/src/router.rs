@@ -181,12 +181,15 @@ fn raid_row_lines(
                     support(a),
                     a.total - d.runner_up
                 ),
+                // A tie is about the pair; a bare margin cannot name it.
                 (None, Some(best), reason) => format!(
-                    "{head} | unassigned: {}; closest {} at {:.2} ({})",
+                    "{head} | unassigned: {}; closest {} at {:.2} ({}), then {} at {:.2}",
                     reason.map_or("no reason recorded", |r| r.reason()),
                     best.name,
                     best.total.max(best.name_score),
-                    support(best)
+                    support(best),
+                    d.runner_up_name.as_deref().unwrap_or("nobody"),
+                    d.runner_up
                 ),
                 (None, None, reason) => {
                     format!("{head} | unassigned: {}", reason.map_or("no candidates", |r| r.reason()))
@@ -200,18 +203,25 @@ fn raid_row_lines(
 /// Tell how many names were read and how many of those were confirmed against the log.
 /// List the amount of names available (log roster) only as extra information.
 fn raid_detection_message(
-    slot_count: usize,
+    frames: usize,
     names_read: usize,
     confirmed: usize,
     unconfirmed: usize,
     candidate_count: usize,
     ambiguous: usize,
+    unmatched: usize,
+    group_hint: &str,
 ) -> String {
     // Lookalikes are the one failure reading again cannot fix, so it leads.
     if ambiguous > 0 {
         return format!(
             "{ambiguous} names too alike to tell apart: sort them out in rearrange mode ({confirmed} confirmed)"
         );
+    }
+
+    // Worth another go, unlike a lookalike.
+    if unmatched > 0 && confirmed == 0 {
+        return format!("{unmatched} names matched no one on the roster: try detecting again");
     }
 
     let state = match (confirmed, unconfirmed) {
@@ -227,7 +237,8 @@ fn raid_detection_message(
         format!("log roster {candidate_count}")
     };
 
-    format!("OCR read {names_read}/{slot_count}: {state} ({roster})")
+    // Frames that were there, not grid slots: a 4-player group reads 4/4.
+    format!("OCR read {names_read}/{frames}{group_hint}: {state} ({roster})")
 }
 
 async fn detect_raid_names(
@@ -253,11 +264,19 @@ async fn detect_raid_names(
     };
 
     // Log first so stalled runs still include the hardware details.
+    // First suspect when readings are garbage: HiDPI and Wayland scale.
+    let frame_size = slots
+        .first()
+        .map(|&(_, _, _, w, h)| format!("{w}x{h}"))
+        .unwrap_or_else(|| "none".into());
     tracing::info!(
         target: "baras::raid_detect",
         cpu = baras_raid_ocr::cpu::summary(),
         slots = slot_count,
         candidates = candidate_count,
+        capture = %format!("{}x{}", image.width, image.height),
+        frame = %frame_size,
+        dump = dump_enabled,
         "starting raid name detection"
     );
 
@@ -300,6 +319,8 @@ async fn detect_raid_names(
         Ok(result) => result,
         Err(e) => {
             tracing::warn!("Raid name detection panicked: {e}");
+            // Nothing decided, so the previous pulse is stale.
+            service_handle.set_ambiguous_slots(Vec::new()).await;
             let _ = result_tx.send("Detection failed: assign names manually".into());
             return;
         }
@@ -318,25 +339,34 @@ async fn detect_raid_names(
     let names_read = names.len();
     names.retain(|(row, _)| !assignments.iter().any(|a| a.row == *row as usize));
 
+    let unreadable_slots = slot_count - empty_slots;
+    // Context only, and only when it disagrees.
+    let group_hint = match service_handle.log_group_size().await {
+        Some(size) if size != unreadable_slots => format!(" (log says {size} player)"),
+        _ => String::new(),
+    };
+
     if assignments.is_empty() && names.is_empty() {
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         tracing::info!(
             elapsed_ms,
             candidate_count,
             empty_slots,
+            unreadable_slots,
             "Raid name detection could not read any names"
         );
+        service_handle.set_ambiguous_slots(Vec::new()).await;
         // No frame anywhere is not a failure to read: the group is smaller than
         // the grid, or the grid is somewhere the frames are not.
         let message = if empty_slots == slot_count {
-            "No raid frames found: check the grid is over them".to_string()
+            format!("No raid frames found{}: check the grid is over them", group_hint)
         } else if observations
             .iter()
             .any(|o| o.hp_value.is_some() || o.hp_percent.is_some())
         {
             "Health read but no names: move the grid up so each name is inside its cell".to_string()
         } else {
-            format!("No names read from {} frames: check alignment", slot_count - empty_slots)
+            format!("No names read from {unreadable_slots} frames: check alignment")
         };
         let _ = result_tx.send(message);
         return;
@@ -370,13 +400,21 @@ async fn detect_raid_names(
     let ambiguous_count = ambiguous.len();
     service_handle.set_ambiguous_slots(ambiguous).await;
 
+    // Read, but matched nobody. Another read may fix it.
+    let unmatched = decisions
+        .iter()
+        .filter(|d| d.rejected == Some(baras_core::raid_detect::Rejection::NoCandidate))
+        .count();
+
     let _ = result_tx.send(raid_detection_message(
-        slot_count,
+        slot_count - empty_slots,
         names_read,
         matched,
         provisional,
         candidate_count,
         ambiguous_count,
+        unmatched,
+        &group_hint,
     ));
 }
 
@@ -961,19 +999,19 @@ async fn process_overlay_update(
 mod raid_detection_message_tests {
     use super::raid_detection_message;
 
-    /// Arguments are (slots, names read, confirmed, unconfirmed, roster, ambiguous).
+    /// Args: frames, read, confirmed, unconfirmed, roster, ambiguous, unmatched, hint.
     #[test]
     fn reports_the_grid_as_it_now_stands() {
         assert_eq!(
-            raid_detection_message(8, 8, 7, 1, 8, 0),
+            raid_detection_message(8, 8, 7, 1, 8, 0, 0, ""),
             "OCR read 8/8: 7 confirmed, 1 unconfirmed (log roster 8)"
         );
         assert_eq!(
-            raid_detection_message(8, 8, 8, 0, 8, 0),
+            raid_detection_message(8, 8, 8, 0, 8, 0, 0, ""),
             "OCR read 8/8: 8 confirmed (log roster 8)"
         );
         assert_eq!(
-            raid_detection_message(8, 6, 6, 0, 8, 0),
+            raid_detection_message(8, 6, 6, 0, 8, 0, 0, ""),
             "OCR read 6/8: 6 confirmed (log roster 8)"
         );
     }
@@ -982,7 +1020,7 @@ mod raid_detection_message_tests {
     #[test]
     fn an_empty_roster_is_explained_rather_than_counted() {
         assert_eq!(
-            raid_detection_message(8, 8, 0, 8, 0, 0),
+            raid_detection_message(8, 8, 0, 8, 0, 0, 0, ""),
             "OCR read 8/8: 8 unconfirmed (no log roster yet)"
         );
     }
@@ -992,7 +1030,7 @@ mod raid_detection_message_tests {
     #[test]
     fn a_roster_larger_than_the_frame_count_is_not_a_failure() {
         assert_eq!(
-            raid_detection_message(8, 8, 8, 0, 9, 0),
+            raid_detection_message(8, 8, 8, 0, 9, 0, 0, ""),
             "OCR read 8/8: 8 confirmed (log roster 9)"
         );
     }
@@ -1002,8 +1040,35 @@ mod raid_detection_message_tests {
     #[test]
     fn lookalikes_ask_for_a_human_rather_than_another_read() {
         assert_eq!(
-            raid_detection_message(8, 8, 6, 2, 8, 2),
+            raid_detection_message(8, 8, 6, 2, 8, 2, 0, ""),
             "2 names too alike to tell apart: sort them out in rearrange mode (6 confirmed)"
+        );
+    }
+
+    /// Unlike lookalikes, a bad read is worth trying again.
+    #[test]
+    fn names_matching_no_one_invite_another_read() {
+        assert_eq!(
+            raid_detection_message(8, 3, 0, 3, 8, 0, 3, ""),
+            "3 names matched no one on the roster: try detecting again"
+        );
+    }
+
+    /// An 8-slot grid in a 4-player flashpoint read every frame there was.
+    #[test]
+    fn empty_slots_are_not_counted_as_frames() {
+        assert_eq!(
+            raid_detection_message(4, 4, 4, 0, 4, 0, 0, ""),
+            "OCR read 4/4: 4 confirmed (log roster 4)"
+        );
+    }
+
+    /// The log's group size is context, never a correction.
+    #[test]
+    fn a_group_size_hint_is_appended_not_enforced() {
+        assert_eq!(
+            raid_detection_message(4, 4, 4, 0, 4, 0, 0, " (log says 8 player)"),
+            "OCR read 4/4 (log says 8 player): 4 confirmed (log roster 4)"
         );
     }
 }

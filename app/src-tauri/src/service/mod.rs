@@ -497,19 +497,13 @@ impl SignalHandler for CombatSignalHandler {
                 self.shared.in_combat.store(true, Ordering::SeqCst);
                 let _ = self.trigger_tx.try_send(MetricsTrigger::CombatStarted);
                 let _ = self.session_event_tx.send(SessionEvent::CombatStarted);
-                let should_rematch = self.shared.is_live_tailing.load(Ordering::SeqCst) && {
-                    let mut registry = self
+                let should_rematch = self.shared.is_live_tailing.load(Ordering::SeqCst)
+                    && self
                         .shared
                         .raid_registry
                         .lock()
-                        .unwrap_or_else(|p| p.into_inner());
-                    // A fight is the unit a provisional gets to prove itself in.
-                    let dropped = registry.age_provisional_slots();
-                    if dropped > 0 {
-                        info!("Dropped {dropped} provisional names never claimed by a player");
-                    }
-                    registry.has_provisional()
-                };
+                        .unwrap_or_else(|p| p.into_inner())
+                        .has_provisional();
                 if should_rematch {
                     let overlay_tx = self.overlay_tx.clone();
                     tokio::spawn(async move {
@@ -3227,8 +3221,10 @@ async fn promote_provisional_slots(shared: &Arc<SharedState>) {
         return;
     }
 
+    let waiting = provisional.len();
     let candidates = crate::service::handler::raid_detection_candidates(shared).await;
     if candidates.is_empty() {
+        debug!("Provisional match skipped: {waiting} names waiting, no log roster yet");
         return;
     }
 
@@ -3247,14 +3243,22 @@ async fn promote_provisional_slots(shared: &Arc<SharedState>) {
         &candidates,
         &baras_core::raid_detect::MatchConfig::default(),
     );
+    // Event-driven now, so silence must differ from not running.
     if assignments.is_empty() {
+        debug!(
+            waiting,
+            candidates = candidates.len(),
+            "Provisional match ran, nothing promoted"
+        );
         return;
     }
 
     for assignment in &assignments {
-        debug!(
-            "Promoted slot {} to {} at {:.2}",
-            assignment.row, assignment.name, assignment.confidence
+        info!(
+            slot = assignment.row,
+            name = %assignment.name,
+            confidence = assignment.confidence,
+            "Promoted provisional name to a log player"
         );
     }
 

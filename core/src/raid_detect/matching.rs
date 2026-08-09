@@ -254,6 +254,8 @@ pub struct RowDecision {
     pub best: Option<CandidateScore>,
     /// Score of the next-best candidate behind `best`.
     pub runner_up: f32,
+    /// Who that was. A lookalike rejection is about the pair.
+    pub runner_up_name: Option<String>,
     /// Why the row went unassigned.
     pub rejected: Option<Rejection>,
 }
@@ -301,6 +303,7 @@ pub fn assign_rows_explained(
                 assigned: None,
                 best: None,
                 runner_up: 0.0,
+                runner_up_name: None,
                 rejected: Some(Rejection::NoRoster),
             })
             .collect();
@@ -340,14 +343,17 @@ pub fn assign_rows_explained(
                     .filter(|&i| parts[row_idx][i].name_score > 0.0)
             });
         let best = best_idx.map(|i| parts[row_idx][i].clone());
-        let runner_up = best_idx.map_or(0.0, |best_idx| {
+        // Named, not just scored: a tie needs both sides to be diagnosable.
+        let runner_up_idx = best_idx.and_then(|best_idx| {
             scores[row_idx]
                 .iter()
                 .enumerate()
                 .filter(|&(i, _)| i != best_idx)
-                .map(|(_, &s)| s)
-                .fold(0.0f32, f32::max)
+                .max_by(|a, b| a.1.total_cmp(b.1))
+                .map(|(i, _)| i)
         });
+        let runner_up = runner_up_idx.map_or(0.0, |i| scores[row_idx][i]);
+        let runner_up_name = runner_up_idx.map(|i| parts[row_idx][i].name.clone());
 
         let mut decision = RowDecision {
             row: observations[row_idx].row,
@@ -356,6 +362,7 @@ pub fn assign_rows_explained(
             assigned: None,
             best,
             runner_up,
+            runner_up_name,
             rejected: None,
         };
 

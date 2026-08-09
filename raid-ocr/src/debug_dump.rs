@@ -3,13 +3,14 @@
 //! The text alone cannot say whether a misread came from the crop, the
 //! preprocessing or the decoder. The images can.
 //!
-//! Off by default, and every failure here is swallowed: a diagnostic that
+//! Every failure here is swallowed: a diagnostic that
 //! breaks detection is worse than no diagnostic.
 
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use baras_overlay::capture::CapturedImage;
 use crate::analysis::{Band, BandKind, PreparedCrop};
@@ -27,43 +28,70 @@ fn session_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// Bytes on disk under [`dump_root`]. Walked once, then kept up to date:
+/// rescanning every pass would grow with the cap.
+static TREE_BYTES: OnceLock<Mutex<u64>> = OnceLock::new();
+
+fn tree_bytes() -> &'static Mutex<u64> {
+    TREE_BYTES.get_or_init(|| Mutex::new(measure_tree()))
+}
+
+/// Size of one dump directory. Dumps are flat, so one level covers it.
+fn dir_bytes(dir: &Path) -> u64 {
+    std::fs::read_dir(dir)
+        .map(|files| {
+            files
+                .flatten()
+                .filter_map(|f| f.metadata().ok())
+                .map(|m| m.len())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn measure_tree() -> u64 {
+    dump_root()
+        .and_then(|root| std::fs::read_dir(root).ok())
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| dir_bytes(&e.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
 /// Delete the oldest dumps until the tree fits in `max_mb`.
 ///
 /// Checked only when a new dump is about to be written, so leaving the option
 /// on costs nothing on a pass that is not dumping.
 fn prune(max_mb: u32) {
+    let budget = u64::from(max_mb) * 1024 * 1024;
+    let mut total = tree_bytes().lock().unwrap_or_else(|p| p.into_inner());
+    if *total <= budget {
+        return;
+    }
+
     let Some(root) = dump_root() else { return };
     let Ok(entries) = std::fs::read_dir(&root) else {
         return;
     };
-
-    // Timestamped names sort oldest-first, and cost nothing to read.
-    let mut dumps: Vec<(PathBuf, u64)> = entries
+    // Timestamped names sort oldest-first.
+    let mut dumps: Vec<PathBuf> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
-        .map(|e| {
-            let size = std::fs::read_dir(e.path())
-                .map(|files| {
-                    files
-                        .flatten()
-                        .filter_map(|f| f.metadata().ok())
-                        .map(|m| m.len())
-                        .sum()
-                })
-                .unwrap_or(0);
-            (e.path(), size)
-        })
+        .map(|e| e.path())
         .collect();
-    dumps.sort_by(|a, b| a.0.cmp(&b.0));
+    dumps.sort();
 
-    let budget = u64::from(max_mb) * 1024 * 1024;
-    let mut total: u64 = dumps.iter().map(|(_, size)| size).sum();
-    for (path, size) in &dumps {
-        if total <= budget {
+    for path in &dumps {
+        if *total <= budget {
             break;
         }
+        let size = dir_bytes(path);
         if std::fs::remove_dir_all(path).is_ok() {
-            total = total.saturating_sub(*size);
+            *total = total.saturating_sub(size);
             tracing::debug!("Pruned OCR debug dump {path:?}");
         }
     }
@@ -180,6 +208,9 @@ impl DebugDump {
         } else {
             tracing::info!("OCR debug dump written to {:?}", self.dir);
         }
+        // All on disk now, so this is what the pass cost.
+        let written = dir_bytes(&self.dir);
+        *tree_bytes().lock().unwrap_or_else(|p| p.into_inner()) += written;
     }
 }
 

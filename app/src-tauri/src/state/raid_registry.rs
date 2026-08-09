@@ -5,8 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-/// Fights a provisional name may go unclaimed before it is dropped.
-const PROVISIONAL_MAX_FIGHTS: u8 = 3;
+/// Detection passes a provisional may survive unclaimed. Passes, not fights:
+/// only a reading that saw it again proves it wrong.
+const PROVISIONAL_MAX_PASSES: u8 = 3;
 
 /// Information about a player registered in the raid frame
 #[derive(Debug, Clone)]
@@ -44,8 +45,8 @@ pub struct RaidSlotRegistry {
     slots: HashMap<u8, RegisteredPlayer>,
     /// Names read before a combat-log roster is available.
     provisional_slots: HashMap<u8, String>,
-    /// Fights each provisional name has survived without being claimed.
-    provisional_age: HashMap<u8, u8>,
+    /// Per slot: last provisional name, and passes survived unclaimed.
+    provisional_age: HashMap<u8, (String, u8)>,
     /// Slots whose reading fitted two or more players equally well.
     ambiguous_slots: HashSet<u8>,
     /// Reverse lookup: entity_id → slot
@@ -169,6 +170,17 @@ impl RaidSlotRegistry {
                 continue;
             }
             self.provisional_slots.insert(slot, name.to_string());
+        }
+
+        // This pass is what proves a name unclaimable.
+        for (slot, name) in self.age_provisional_slots() {
+            // The name says what OCR keeps misreading.
+            tracing::info!(
+                slot,
+                name = %name,
+                passes = PROVISIONAL_MAX_PASSES,
+                "Dropped provisional name never claimed by a player"
+            );
         }
     }
 
@@ -303,20 +315,33 @@ impl RaidSlotRegistry {
         self.ambiguous_slots.contains(&slot)
     }
 
-    /// Age every provisional name by one fight, dropping those never claimed.
+    /// Drop provisional names that keep coming back unclaimed.
     ///
     /// A misread matching nobody would otherwise hold its slot for the session
-    /// and keep the real player out of it.
-    pub fn age_provisional_slots(&mut self) -> usize {
+    /// and keep the real player out. A new reading restarts the count.
+    fn age_provisional_slots(&mut self) -> Vec<(u8, String)> {
         let age = &mut self.provisional_age;
-        let before = self.provisional_slots.len();
-        self.provisional_slots.retain(|slot, _| {
-            let fights = age.entry(*slot).or_insert(0);
-            *fights += 1;
-            *fights <= PROVISIONAL_MAX_FIGHTS
+        let mut dropped = Vec::new();
+
+        self.provisional_slots.retain(|slot, name| {
+            let normalized = baras_core::raid_detect::normalize(name);
+            let entry = age
+                .entry(*slot)
+                .or_insert_with(|| (normalized.clone(), 0));
+            if entry.0 == normalized {
+                entry.1 += 1;
+            } else {
+                *entry = (normalized, 0);
+            }
+            let keep = entry.1 <= PROVISIONAL_MAX_PASSES;
+            if !keep {
+                dropped.push((*slot, name.clone()));
+            }
+            keep
         });
+
         age.retain(|slot, _| self.provisional_slots.contains_key(slot));
-        before - self.provisional_slots.len()
+        dropped
     }
 
     pub fn registered_len(&self) -> usize {

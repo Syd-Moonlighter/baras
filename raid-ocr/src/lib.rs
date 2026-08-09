@@ -146,7 +146,7 @@ pub fn observe_slots_dumping(
     }
 
     let detection_started = Instant::now();
-    let (narrowed, textless) = narrow_names(&mut crops);
+    let (trimmed, textless) = narrow_names(&mut crops);
     let detection_ms = detection_started.elapsed().as_millis() as u64;
 
     // Health is a second look, so set its crops aside rather than read them.
@@ -172,7 +172,8 @@ pub fn observe_slots_dumping(
         detection_ms,
         recognition_ms,
         names = crops.len(),
-        narrowed,
+        trimmed,
+        rejected = textless.len(),
         health_held = held.len(),
         "Read raid frame names"
     );
@@ -274,10 +275,20 @@ pub fn observe_slots_dumping(
         }
     }
 
+    // Per slot: a count cannot show "slot 3 is always empty".
+    let layout: String = states
+        .iter()
+        .map(|(_, s)| match s {
+            SlotState::Read => 'R',
+            SlotState::Unreadable => 'U',
+            SlotState::Empty => '.',
+        })
+        .collect();
     tracing::info!(
         read = states.iter().filter(|(_, s)| *s == SlotState::Read).count(),
         unreadable = states.iter().filter(|(_, s)| *s == SlotState::Unreadable).count(),
         empty = states.iter().filter(|(_, s)| *s == SlotState::Empty).count(),
+        slots = %layout,
         "Raid frame slots"
     );
 
@@ -427,7 +438,8 @@ fn recognition_pool() -> Option<&'static rayon::ThreadPool> {
 /// Narrow name crops to the columns detection finds text in, dropping those
 /// with none. Health digits sit on the bar, already bounded, so they are left.
 ///
-/// Returns how many crops changed, and the slots detection found no text in.
+/// Returns crops trimmed, and slots with no text. Different outcomes, counted
+/// apart.
 fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> (usize, Vec<usize>) {
     if engine::warm().is_err() {
         return (0, Vec::new());
@@ -456,11 +468,10 @@ fn narrow_names(crops: &mut [(usize, Band, Option<PreparedCrop>)]) -> (usize, Ve
                     changed += 1;
                 }
             }
-            // No text anywhere in the crop: an empty frame.
+            // No text anywhere in the crop: an empty frame, not a trim.
             Some(None) => {
                 crops[i].2 = None;
                 textless.push(crops[i].0);
-                changed += 1;
             }
             // Undecided; keep the crop whole rather than lose the slot.
             None => {}
@@ -507,7 +518,7 @@ pub fn detect(
 pub fn assign_with_health(
     reading: &mut Reading,
     candidates: &[PlayerCandidate],
-    mut dump: Option<&mut DebugDump>,
+    dump: Option<&mut DebugDump>,
 ) -> (Vec<RowAssignment>, Vec<RowDecision>) {
     let config = MatchConfig::default();
     let (assignments, decisions) = assign_rows_explained(&reading.rows, candidates, &config);
@@ -517,17 +528,32 @@ pub fn assign_with_health(
         return (assignments, decisions);
     }
 
-    let read = reading.read_health(&retry, dump.as_deref_mut());
-    tracing::info!(rows = retry.len(), read, "Re-read health for undecided rows");
+    let read = reading.read_health(&retry, dump);
     if read == 0 {
+        tracing::info!(rows = retry.len(), read, "Re-read health for undecided rows");
         return (assignments, decisions);
     }
 
-    assign_rows_explained(
+    let (retried, retried_decisions) = assign_rows_explained(
         &reading.rows,
         candidates,
         &config.clone().with_health_rescue(),
-    )
+    );
+
+    // Whether health earns its pass is still open; this answers it live.
+    let before: Vec<(usize, i64)> = assignments.iter().map(|a| (a.row, a.entity_id)).collect();
+    let after: Vec<(usize, i64)> = retried.iter().map(|a| (a.row, a.entity_id)).collect();
+    let gained = after.iter().filter(|a| !before.contains(a)).count();
+    let lost = before.iter().filter(|b| !after.contains(b)).count();
+    tracing::info!(
+        rows = retry.len(),
+        read,
+        gained,
+        lost,
+        "Re-read health for undecided rows"
+    );
+
+    (retried, retried_decisions)
 }
 
 /// Rows a second signal could still settle.
