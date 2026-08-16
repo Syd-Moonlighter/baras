@@ -33,10 +33,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos, LoadCursorW,
     PeekMessageW, RegisterClassExW, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
     UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW,
-    MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, ULW_ALPHA,
-    WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    MA_NOACTIVATE, MSG, PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE,
+    ULW_ALPHA, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_NCHITTEST, WM_QUIT, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use windows::Win32::Foundation::RECT;
@@ -529,11 +529,11 @@ impl WindowsOverlay {
             self.click_through
         );
         unsafe {
-            let mut ex_style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+            // Make sure overlay interaction does not steal focus from SWTOR.
+            let mut ex_style =
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             if self.click_through && !self.region_hot {
-                ex_style |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
-            } else if self.click_through {
-                ex_style |= WS_EX_NOACTIVATE;
+                ex_style |= WS_EX_TRANSPARENT;
             }
             overlay_log!("  Setting extended style to {:#x}", ex_style.0);
             SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex_style.0 as isize);
@@ -620,9 +620,10 @@ impl OverlayPlatform for WindowsOverlay {
                 PlatformError::Other(format!("GetModuleHandleW failed: {}", e))
             })?;
 
-            let mut ex_style = WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+            let mut ex_style =
+                WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             if config.click_through {
-                ex_style |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+                ex_style |= WS_EX_TRANSPARENT;
             }
             overlay_log!("  Extended style: {:#x}", ex_style.0);
 
@@ -1033,6 +1034,9 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match msg {
+        // A overlay still receives mouse input, but never takes
+        // focus from the SWTOR when being clicked.
+        WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_NCHITTEST => {
             // Return HTTRANSPARENT for click-through when in locked mode
             // The actual click-through is handled by WS_EX_TRANSPARENT style
