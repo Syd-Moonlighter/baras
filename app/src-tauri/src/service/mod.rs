@@ -5,8 +5,11 @@
 //! - ServiceHandle: For sending commands + accessing shared state
 //! - CombatService: Background task that processes commands and updates shared state
 mod directory;
+mod dxun_arrow;
+mod gods_dooms_delay;
 mod handler;
 pub(crate) mod process_monitor;
+mod r4_anomalously_skilled;
 
 use crate::state::SharedState;
 pub use crate::state::{RaidSlotRegistry, RegisteredPlayer};
@@ -22,7 +25,7 @@ use baras_core::context::{AppConfig, AppConfigExt, ChallengeColumns, DirectoryIn
 use baras_core::directory_watcher::DirectoryWatcher;
 use baras_core::encounter::{EncounterState, PhaseType};
 use baras_core::encounter::summary::classify_encounter;
-use baras_core::game_data::{Discipline, Role};
+use baras_core::game_data::{Difficulty, Discipline, Role};
 use baras_core::timers::FiredAlert;
 use baras_core::{
     ActiveEffect, BossEncounterDefinition, DefinitionConfig, DefinitionSet, DisplayTarget,
@@ -167,16 +170,14 @@ impl AreaKind {
         }
     }
 
-    /// Whether this area type should have the timer auto-start immediately on entry
-    /// (as opposed to operations which wait for boss pull).
+    /// Whether the timer starts when this area is entered.
+    /// Operations use content or boss triggers instead.
     pub fn auto_starts_on_entry(self) -> bool {
         matches!(self, AreaKind::Flashpoint | AreaKind::PvP)
     }
 
-    /// Whether this area type should auto-reset the timer when entered.
-    /// Operations are excluded: the operation timer must not be driven by area
-    /// changes — it starts on first boss pull (or manual start) and stops only
-    /// when the final boss is defeated (or manual stop).
+    /// Whether entry resets timer state.
+    /// Operations preserve state across area changes.
     pub fn auto_resets_on_entry(self) -> bool {
         matches!(self, AreaKind::Flashpoint | AreaKind::PvP)
     }
@@ -281,7 +282,7 @@ impl OperationTimerState {
             self.started_at = None;
             self.accumulated_secs = elapsed_at_exit;
             self.exited_at = None;
-            // Not a manual stop — the next op's first boss pull may auto-start
+            // Allow the next operation trigger to start a new run.
             return true;
         }
         false
@@ -430,9 +431,15 @@ struct CombatSignalHandler {
     monitor_requested: bool,
     /// Whether the active boss definition has is_final_boss = true.
     /// Captured in BossEncounterDetected and consumed in CombatEnded.
-    /// (The _encounter arg in CombatEnded is already the new empty encounter,
+    /// (The encounter arg in CombatEnded is already the new empty encounter,
     ///  so we must snapshot this flag earlier.)
     current_boss_is_final: bool,
+    /// Whether the Arrow trigger fired during this Dxun visit.
+    dxun_arrow_started: bool,
+    /// Whether the R-4 start line fired during this visit.
+    r4_anomalously_skilled_started: bool,
+    /// Area classification for maps not present in the static area list.
+    area_kind_override: Option<AreaKind>,
 }
 
 impl CombatSignalHandler {
@@ -456,6 +463,9 @@ impl CombatSignalHandler {
             current_role,
             monitor_requested: false,
             current_boss_is_final: false,
+            dxun_arrow_started: false,
+            r4_anomalously_skilled_started: false,
+            area_kind_override: None,
         }
     }
 
@@ -464,7 +474,139 @@ impl CombatSignalHandler {
     /// from the parse-worker restore, so it stays correct when this handler
     /// never saw the AreaEntered signal (app attached mid-instance).
     fn current_area_kind(&self) -> AreaKind {
-        AreaKind::from_area_id(self.shared.current_area_id.load(Ordering::SeqCst))
+        self.area_kind_override.unwrap_or_else(|| {
+            AreaKind::from_area_id(self.shared.current_area_id.load(Ordering::SeqCst))
+        })
+    }
+
+    fn start_operation_timer(
+        &self,
+        operation_name: Option<&str>,
+        op_instance: Option<(i64, i64)>,
+    ) -> bool {
+        if !self.shared.is_live_tailing.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        let mut timer = self.shared.operation_timer.lock().unwrap();
+        if timer.is_running() || timer.manually_stopped {
+            return false;
+        }
+
+        timer.reset();
+        if let Some(name) = operation_name {
+            timer.operation_name = Some(name.to_string());
+        }
+        if let Some(instance) = op_instance {
+            timer.op_instance = Some(instance);
+        }
+        timer.start();
+        drop(timer);
+
+        let _ = self
+            .cmd_tx
+            .try_send(ServiceCommand::EmitOperationTimerTick);
+        true
+    }
+
+    fn try_start_dxun_arrow_timer(
+        &mut self,
+        source_id: i64,
+        target_id: i64,
+        encounter: Option<&baras_core::encounter::CombatEncounter>,
+    ) {
+        if self.dxun_arrow_started
+            || !self.shared.is_live_tailing.load(Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let Some(encounter) = encounter else {
+            return;
+        };
+        if encounter.area_id != Some(dxun_arrow::DXUN_AREA_ID)
+            || !matches!(
+                encounter.difficulty,
+                Some(Difficulty::Master8 | Difficulty::Master16)
+            )
+        {
+            return;
+        }
+
+        let Some(add_position) = encounter.entity_position(source_id) else {
+            return;
+        };
+        let Some(player_position) = encounter.entity_position(target_id) else {
+            return;
+        };
+        if !dxun_arrow::matches_first_pack_pull(add_position, player_position) {
+            return;
+        }
+
+        // Do not retrigger after a manual reset or stop.
+        self.dxun_arrow_started = true;
+
+        if !self.start_operation_timer(None, None) {
+            return;
+        }
+
+        info!(
+            source_id,
+            target_id,
+            add_x = add_position.x,
+            add_y = add_position.y,
+            add_z = add_position.z,
+            player_x = player_position.x,
+            player_y = player_position.y,
+            player_z = player_position.z,
+            "Started operation timer from Dxun Arrow first-pack pull"
+        );
+    }
+
+    fn try_start_r4_anomalously_skilled_timer(
+        &mut self,
+        encounter: Option<&baras_core::encounter::CombatEncounter>,
+    ) {
+        if self.r4_anomalously_skilled_started
+            || !self.shared.is_live_tailing.load(Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let Some(encounter) = encounter else {
+            return;
+        };
+        let crossed_player = encounter.players.keys().find_map(|&player_id| {
+            let position = encounter.entity_position(player_id)?;
+            r4_anomalously_skilled::matches_player_position(
+                encounter.area_id,
+                encounter.difficulty,
+                position,
+            )
+            .then_some((player_id, position))
+        });
+        let Some((player_id, position)) = crossed_player else {
+            return;
+        };
+
+        self.r4_anomalously_skilled_started = true;
+        if !self.start_operation_timer(
+            Some(r4_anomalously_skilled::TIMER_NAME),
+            Some((
+                r4_anomalously_skilled::R4_AREA_ID,
+                encounter.difficulty_id.unwrap_or_default(),
+            )),
+        ) {
+            return;
+        }
+
+        info!(
+            player_id,
+            player_x = position.x,
+            player_y = position.y,
+            player_z = position.z,
+            "Started Anomalously Skilled timer at the R-4 start line"
+        );
     }
 }
 
@@ -472,7 +614,7 @@ impl SignalHandler for CombatSignalHandler {
     fn handle_signal(
         &mut self,
         signal: &GameSignal,
-        _encounter: Option<&baras_core::encounter::CombatEncounter>,
+        encounter: Option<&baras_core::encounter::CombatEncounter>,
     ) {
         // On first event processed, start monitoring the game process.
         // Always monitor so game_running state is accurate for stale detection.
@@ -496,6 +638,8 @@ impl SignalHandler for CombatSignalHandler {
                 }
             }
         }
+
+        self.try_start_r4_anomalously_skilled_timer(encounter);
 
         match signal {
             GameSignal::CombatStarted { .. } => {
@@ -528,7 +672,7 @@ impl SignalHandler for CombatSignalHandler {
                 // Auto-stop operation timer when the final boss is KILLED (not wiped).
                 // `success` comes from the signal and is set by determine_success() at the
                 // emit site; `current_boss_is_final` was snapshotted at BossEncounterDetected
-                // because `_encounter` here is the new empty encounter (push_new_encounter()
+                // because `encounter` here is the new empty encounter (push_new_encounter()
                 // already ran).
                 //
                 // Only in live mode — historical replays should not drive the timer.
@@ -638,9 +782,40 @@ impl SignalHandler for CombatSignalHandler {
                     let _ = self.overlay_tx.try_send(OverlayUpdate::ConversationEnded);
                 }
             }
-            GameSignal::AreaEntered { area_id, difficulty_id, .. } => {
+            GameSignal::TargetChanged {
+                source_id,
+                source_entity_type,
+                target_id,
+                target_entity_type,
+                ..
+            } => {
+                if *source_entity_type == EntityType::Npc
+                    && *target_entity_type == EntityType::Player
+                {
+                    self.try_start_dxun_arrow_timer(*source_id, *target_id, encounter);
+                }
+            }
+            GameSignal::AreaEntered {
+                area_id,
+                area_name,
+                difficulty_id,
+                ..
+            } => {
                 // Note: Boss definitions are loaded synchronously in process_event via definition_loader
                 let current = self.shared.current_area_id.load(Ordering::SeqCst);
+                let prev_kind = self.current_area_kind();
+                let is_forge_approach = gods_dooms_delay::is_forge_approach(area_name);
+                let starts_dooms_delay =
+                    gods_dooms_delay::matches_area_entry(area_name, *difficulty_id);
+                self.area_kind_override = is_forge_approach.then_some(AreaKind::Operation);
+                if *area_id == dxun_arrow::DXUN_AREA_ID && current != dxun_arrow::DXUN_AREA_ID {
+                    self.dxun_arrow_started = false;
+                }
+                if *area_id == r4_anomalously_skilled::R4_AREA_ID
+                    && current != r4_anomalously_skilled::R4_AREA_ID
+                {
+                    self.r4_anomalously_skilled_started = false;
+                }
                 if *area_id != current {
                     self.shared
                         .current_area_id
@@ -655,34 +830,51 @@ impl SignalHandler for CombatSignalHandler {
                         // `current` is the area id before this transition; it is
                         // also synced from the parse-worker restore, so this stays
                         // correct when the entry event was consumed by the worker.
-                        let prev_kind = AreaKind::from_area_id(current);
-                        let new_kind = AreaKind::from_area_id(*area_id);
+                        let new_kind = if is_forge_approach {
+                            AreaKind::Operation
+                        } else {
+                            AreaKind::from_area_id(*area_id)
+                        };
 
                         // Determine the display name for this area.
                         // For non-timed areas (fleet/open world) we don't update the name —
                         // the previous instance name is preserved on the overlay so the user
                         // can still see what run the timer belongs to after returning to fleet.
-                        let area_display_name: Option<String> = match new_kind {
-                            AreaKind::Operation => baras_core::game_data::get_operation_name(*area_id)
-                                .map(|s| s.to_string()),
-                            AreaKind::Flashpoint => baras_core::game_data::get_flashpoint_name(*area_id)
-                                .map(|s| s.to_string()),
-                            AreaKind::PvP => Some("PvP".to_string()),
-                            AreaKind::Other => None, // unused below — name preserved
+                        let area_display_name: Option<String> = if starts_dooms_delay {
+                            Some(gods_dooms_delay::TIMER_NAME.to_string())
+                        } else if is_forge_approach {
+                            baras_core::game_data::get_operation_name(
+                                gods_dooms_delay::GODS_AREA_ID,
+                            )
+                            .map(|s| s.to_string())
+                        } else {
+                            match new_kind {
+                                AreaKind::Operation => {
+                                    baras_core::game_data::get_operation_name(*area_id)
+                                        .map(|s| s.to_string())
+                                }
+                                AreaKind::Flashpoint => {
+                                    baras_core::game_data::get_flashpoint_name(*area_id)
+                                        .map(|s| s.to_string())
+                                }
+                                AreaKind::PvP => Some("PvP".to_string()),
+                                AreaKind::Other => None, // unused below — name preserved
+                            }
                         };
 
-                        // Entering a timed area (op/FP/PvP): update the display name.
-                        // For FP/PvP: also reset the timer for a fresh run.
-                        // For Operations: do NOT reset — the timer only changes state on
-                        // first boss pull, final boss kill, explicit user action, joining
-                        // a different instance, or the exit timeout.
+                        // Operations retain timer state; content or boss triggers start them.
                         if matches!(
                             new_kind,
                             AreaKind::Operation | AreaKind::Flashpoint | AreaKind::PvP
                         ) {
                             let mut timer = self.shared.operation_timer.lock().unwrap();
                             if matches!(new_kind, AreaKind::Operation) {
-                                let instance = (*area_id, *difficulty_id);
+                                let instance_area_id = if is_forge_approach {
+                                    gods_dooms_delay::GODS_AREA_ID
+                                } else {
+                                    *area_id
+                                };
+                                let instance = (instance_area_id, *difficulty_id);
                                 // Joining a different instance (other operation and/or
                                 // difficulty) ends the previous run.
                                 if timer.is_running()
@@ -756,6 +948,15 @@ impl SignalHandler for CombatSignalHandler {
                         );
                     }
                 }
+
+                if starts_dooms_delay
+                    && self.start_operation_timer(
+                        Some(gods_dooms_delay::TIMER_NAME),
+                        Some((gods_dooms_delay::GODS_AREA_ID, *difficulty_id)),
+                    )
+                {
+                    info!("Started Doom's Delay timer on Forge Approach entry");
+                }
             }
             GameSignal::BossEncounterDetected {
                 definition_idx,
@@ -764,8 +965,8 @@ impl SignalHandler for CombatSignalHandler {
             } => {
                 // Snapshot is_final_boss from this boss definition.
                 // We must do it here because by the time CombatEnded fires, push_new_encounter()
-                // has already run and _encounter will be the new, empty encounter.
-                self.current_boss_is_final = if let Some(enc) = _encounter {
+                // has already run and encounter will be the new, empty encounter.
+                self.current_boss_is_final = if let Some(enc) = encounter {
                     enc.boss_definitions()
                         .get(*definition_idx)
                         .map(|d| d.is_final_boss)
@@ -775,7 +976,7 @@ impl SignalHandler for CombatSignalHandler {
                 };
 
                 // Send notes for this specific boss to the overlay
-                if let Some(enc) = _encounter {
+                if let Some(enc) = encounter {
                     if let Some(def) = enc.boss_definitions().get(*definition_idx) {
                         if let Some(notes) = &def.notes {
                             if !notes.is_empty() {
@@ -789,15 +990,8 @@ impl SignalHandler for CombatSignalHandler {
                     }
                 }
 
-                // Auto-start operation timer on first boss pull in an operation.
-                // Start directly (not via command channel) to avoid 1-second tick delay.
-                // Only in live mode - historical replays should not drive the timer.
-                //
-                // We reset() before start() so the timer always begins at 0 — this is the
-                // "time from first boss pull" semantic. Area entry no longer resets the
-                // timer for operations, so accumulated time from a previous op's final-boss
-                // auto-stop (which is preserved for display) must be zeroed here before the
-                // next run begins. Safe because we've already verified !manually_stopped.
+                // First-boss fallback when no earlier operation trigger started the timer.
+                // Clear elapsed state preserved from the previous operation.
                 if self.shared.is_live_tailing.load(Ordering::SeqCst) {
                     if matches!(self.current_area_kind(), AreaKind::Operation) {
                         let mut timer = self.shared.operation_timer.lock().unwrap();
@@ -2265,19 +2459,22 @@ impl CombatService {
                             "Subprocess parse completed"
                         );
 
-                        // Requirement 5: Backfill the operation timer when resuming live
-                        // mode mid-area so the timer immediately reflects how long the
-                        // player has been in the instance.
-                        //
-                        // - Flashpoints / PvP: timer starts from area entry time.
-                        // - Operations: timer starts from the first boss pull time
-                        //   (using the earliest encounter start in parse_result.encounters).
-                        //
-                        // Only fires when in live tailing mode and the timer isn't already
-                        // running (handles the app restart / reconnect case).
+                        // Restore elapsed time after resuming live tailing mid-instance.
+                        // FP/PvP and Doom's Delay use entry; other operations use combat.
                         if self.shared.is_live_tailing.load(Ordering::SeqCst) {
                             let area_id = parse_result.area.area_id;
-                            let area_kind = AreaKind::from_area_id(area_id);
+                            let is_forge_approach = gods_dooms_delay::is_forge_approach(
+                                &parse_result.area.area_name,
+                            );
+                            let is_dooms_delay = gods_dooms_delay::matches_area_entry(
+                                &parse_result.area.area_name,
+                                parse_result.area.difficulty_id,
+                            );
+                            let area_kind = if is_forge_approach {
+                                AreaKind::Operation
+                            } else {
+                                AreaKind::from_area_id(area_id)
+                            };
                             let timer_already_running = self.shared.operation_timer
                                 .lock().unwrap().is_running();
 
@@ -2307,16 +2504,19 @@ impl CombatService {
                                         }
                                     }
                                     AreaKind::Operation => {
-                                        // Use earliest boss pull time in this session
-                                        let earliest_start = parse_result.encounters.iter()
-                                            .filter(|s| s.encounter_type == PhaseType::Raid)
-                                            .filter_map(|s| s.start_time.as_ref())
-                                            .filter_map(|t| {
-                                                chrono::NaiveDateTime::parse_from_str(
-                                                    t, "%Y-%m-%dT%H:%M:%S"
-                                                ).ok()
-                                            })
-                                            .min();
+                                        let earliest_start = if is_dooms_delay {
+                                            parse_result.area.entered_at
+                                        } else {
+                                            parse_result.encounters.iter()
+                                                .filter(|s| s.encounter_type == PhaseType::Raid)
+                                                .filter_map(|s| s.start_time.as_ref())
+                                                .filter_map(|t| {
+                                                    chrono::NaiveDateTime::parse_from_str(
+                                                        t, "%Y-%m-%dT%H:%M:%S"
+                                                    ).ok()
+                                                })
+                                                .min()
+                                        };
 
                                         if let Some(first_pull) = earliest_start {
                                             let now = chrono::Local::now().naive_local();
@@ -2326,10 +2526,24 @@ impl CombatService {
                                             let capped = elapsed_secs.min(MAX_BACKFILL_SECS);
                                             let mut timer = self.shared.operation_timer.lock().unwrap();
                                             if !timer.manually_stopped {
-                                                info!(
-                                                    elapsed_secs = capped,
-                                                    "Backfilling operation timer from first boss pull"
-                                                );
+                                                if is_dooms_delay {
+                                                    timer.operation_name = Some(
+                                                        gods_dooms_delay::TIMER_NAME.to_string(),
+                                                    );
+                                                    timer.op_instance = Some((
+                                                        gods_dooms_delay::GODS_AREA_ID,
+                                                        parse_result.area.difficulty_id,
+                                                    ));
+                                                    info!(
+                                                        elapsed_secs = capped,
+                                                        "Backfilling Doom's Delay from Forge Approach entry"
+                                                    );
+                                                } else {
+                                                    info!(
+                                                        elapsed_secs = capped,
+                                                        "Backfilling operation timer from earliest raid combat"
+                                                    );
+                                                }
                                                 timer.start_with_offset(capped);
                                                 drop(timer);
                                                 self.emit_operation_timer_tick();
