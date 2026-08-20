@@ -6,6 +6,7 @@
 //! - CombatService: Background task that processes commands and updates shared state
 mod directory;
 mod handler;
+mod raid_detection;
 pub(crate) mod process_monitor;
 
 use crate::state::SharedState;
@@ -637,9 +638,40 @@ impl SignalHandler for CombatSignalHandler {
                     let _ = self.overlay_tx.try_send(OverlayUpdate::ConversationEnded);
                 }
             }
-            GameSignal::AreaEntered { area_id, difficulty_id, .. } => {
+            GameSignal::AreaEntered {
+                area_id,
+                difficulty_id,
+                timestamp,
+                ..
+            } => {
                 // Note: Boss definitions are loaded synchronously in process_event via definition_loader
                 let current = self.shared.current_area_id.load(Ordering::SeqCst);
+                let is_live = self.shared.is_live_tailing.load(Ordering::SeqCst);
+                if raid_detection::should_reset_on_area_entry(current, *area_id, is_live) {
+                    self.shared
+                        .raid_registry
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clear();
+                    self.shared
+                        .ability_roster
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .clear();
+                    self.shared.roster_changed.store(false, Ordering::Relaxed);
+                    *self
+                        .shared
+                        .pvp_ocr_roster_started_at
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = Some(*timestamp);
+                    info!(area_id, "Cleared OCR roster on entering a new PvP area");
+                } else if is_live && *area_id != current {
+                    *self
+                        .shared
+                        .pvp_ocr_roster_started_at
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner()) = None;
+                }
                 if *area_id != current {
                     self.shared
                         .current_area_id
@@ -650,7 +682,7 @@ impl SignalHandler for CombatSignalHandler {
 
                     // ── Operation timer area-transition logic ────────────────────
                     // Only in live mode - historical replays should not drive the timer
-                    if self.shared.is_live_tailing.load(Ordering::SeqCst) {
+                    if is_live {
                         // `current` is the area id before this transition; it is
                         // also synced from the parse-worker restore, so this stays
                         // correct when the entry event was consumed by the worker.
@@ -1947,6 +1979,11 @@ impl CombatService {
         // Entity ids do not survive a session change, so neither can the
         // ability-cast roster (a user frame clear deliberately keeps it).
         self.shared.ability_roster.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        *self
+            .shared
+            .pvp_ocr_roster_started_at
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = None;
 
         // Create trigger channel for signal-driven metrics updates (tokio channel - no spawn_blocking needed)
         let (trigger_tx, mut trigger_rx) = mpsc::channel::<MetricsTrigger>(8);
@@ -3217,7 +3254,7 @@ async fn promote_provisional_slots(shared: &Arc<SharedState>) {
     }
 
     let waiting = provisional.len();
-    let candidates = crate::service::handler::raid_detection_candidates(shared).await;
+    let candidates = raid_detection::raid_detection_candidates(shared).await;
     if candidates.is_empty() {
         debug!("Provisional match skipped: {waiting} names waiting, no log roster yet");
         return;

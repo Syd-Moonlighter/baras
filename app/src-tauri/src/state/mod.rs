@@ -141,6 +141,9 @@ pub struct SharedState {
     /// combat), so pre-combat HOT/buff targets live only here — without this,
     /// clearing the frames makes them unmatchable until their next combat.
     pub ability_roster: Mutex<baras_core::raid_detect::CandidateSet>,
+    /// Start of the current live PvP-area OCR roster. Candidates observed
+    /// before this timestamp belong to an earlier group or match.
+    pub pvp_ocr_roster_started_at: Mutex<Option<chrono::NaiveDateTime>>,
     /// A player was registered since the provisional slots were last matched.
     pub roster_changed: AtomicBool,
     /// Current area ID for lazy loading timers (0 = unknown)
@@ -197,6 +200,7 @@ impl SharedState {
             is_live_tailing: AtomicBool::new(true), // Start in live tailing mode
             raid_registry: Mutex::new(RaidSlotRegistry::new(raid_slots)),
             ability_roster: Mutex::new(baras_core::raid_detect::CandidateSet::new()),
+            pvp_ocr_roster_started_at: Mutex::new(None),
             roster_changed: AtomicBool::new(false),
             current_area_id: AtomicI64::new(0),
             last_player_id: AtomicI64::new(0),

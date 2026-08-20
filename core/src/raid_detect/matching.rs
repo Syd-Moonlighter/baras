@@ -95,9 +95,12 @@ pub fn name_similarity(observed: &str, target: &str) -> Option<f32> {
         return Some(1.0);
     }
 
-    // `normalize` yields ASCII alphanumerics only, so byte slicing is safe.
+    // Normalized names are ASCII, so byte slicing is safe. Compare one extra target
+    // character so a dropped OCR glyph only counts as one omission.
     if observed.len() < target.len() {
-        Some(similarity(observed, &target[..observed.len()]))
+        let clipped = similarity(observed, &target[..observed.len()]);
+        let one_missing = similarity(observed, &target[..observed.len() + 1]);
+        Some(clipped.max(one_missing))
     } else if observed.len() > target.len() && target.len() >= MIN_OCR_NAME_CHARS {
         // Markers and status icons sometimes leave junk after an otherwise good
         // read. Compare the candidate-length prefix as well as the whole line.
