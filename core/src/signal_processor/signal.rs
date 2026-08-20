@@ -145,6 +145,13 @@ pub enum GameSignal {
         is_crit: bool,
     },
 
+    /// A player took environmental falling damage.
+    FallingDamage {
+        entity_id: i64,
+        entity_type: EntityType,
+        timestamp: NaiveDateTime,
+    },
+
     /// Healing done (for effect refresh on heal completion)
     HealingDone {
         /// The ability that healed
@@ -317,6 +324,7 @@ impl GameSignal {
             | Self::EffectChargesChanged { timestamp, .. }
             | Self::AbilityActivated { timestamp, .. }
             | Self::DamageTaken { timestamp, .. }
+            | Self::FallingDamage { timestamp, .. }
             | Self::HealingDone { timestamp, .. }
             | Self::TargetChanged { timestamp, .. }
             | Self::TargetCleared { timestamp, .. }

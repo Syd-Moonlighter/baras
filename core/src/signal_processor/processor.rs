@@ -1506,6 +1506,18 @@ impl EventProcessor {
     /// Emit signals for damage events (tank buster detection, raid-wide damage, etc.).
     /// Pure transformation - no encounter state modification.
     fn emit_damage_signals(&self, event: &CombatEvent, out: &mut Vec<GameSignal>) {
+        if event.effect.type_id == effect_type_id::EVENT
+            && event.effect.effect_id == effect_id::FALLING_DAMAGE
+            && event.source_entity.entity_type == EntityType::Player
+        {
+            out.push(GameSignal::FallingDamage {
+                entity_id: event.source_entity.log_id,
+                entity_type: event.source_entity.entity_type,
+                timestamp: event.timestamp,
+            });
+            return;
+        }
+
         // Only emit for damage during APPLYEFFECT
         if event.effect.type_id != effect_type_id::APPLYEFFECT
             || event.effect.effect_id != effect_id::DAMAGE

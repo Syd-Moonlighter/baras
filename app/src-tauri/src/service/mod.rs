@@ -484,6 +484,15 @@ impl CombatSignalHandler {
         operation_name: Option<&str>,
         op_instance: Option<(i64, i64)>,
     ) -> bool {
+        self.start_operation_timer_with_offset(operation_name, op_instance, 0)
+    }
+
+    fn start_operation_timer_with_offset(
+        &self,
+        operation_name: Option<&str>,
+        op_instance: Option<(i64, i64)>,
+        offset_secs: u64,
+    ) -> bool {
         if !self.shared.is_live_tailing.load(Ordering::SeqCst) {
             return false;
         }
@@ -500,12 +509,10 @@ impl CombatSignalHandler {
         if let Some(instance) = op_instance {
             timer.op_instance = Some(instance);
         }
-        timer.start();
+        timer.start_with_offset(offset_secs);
         drop(timer);
 
-        let _ = self
-            .cmd_tx
-            .try_send(ServiceCommand::EmitOperationTimerTick);
+        let _ = self.cmd_tx.try_send(ServiceCommand::EmitOperationTimerTick);
         true
     }
 
@@ -608,6 +615,55 @@ impl CombatSignalHandler {
             "Started Anomalously Skilled timer at the R-4 start line"
         );
     }
+
+    fn try_start_r4_elevator_fall_timer(
+        &mut self,
+        player_id: i64,
+        entity_type: EntityType,
+        encounter: Option<&baras_core::encounter::CombatEncounter>,
+    ) {
+        if self.r4_anomalously_skilled_started
+            || entity_type != EntityType::Player
+            || !self.shared.is_live_tailing.load(Ordering::SeqCst)
+        {
+            return;
+        }
+
+        let Some(encounter) = encounter else {
+            return;
+        };
+        let Some(position) = encounter.entity_position(player_id) else {
+            return;
+        };
+        if !r4_anomalously_skilled::matches_elevator_fall(
+            encounter.area_id,
+            encounter.difficulty,
+            position,
+        ) {
+            return;
+        }
+
+        self.r4_anomalously_skilled_started = true;
+        if !self.start_operation_timer_with_offset(
+            Some(r4_anomalously_skilled::TIMER_NAME),
+            Some((
+                r4_anomalously_skilled::R4_AREA_ID,
+                encounter.difficulty_id.unwrap_or_default(),
+            )),
+            r4_anomalously_skilled::ELEVATOR_FALL_OFFSET_SECS,
+        ) {
+            return;
+        }
+
+        info!(
+            player_id,
+            player_x = position.x,
+            player_y = position.y,
+            player_z = position.z,
+            offset_secs = r4_anomalously_skilled::ELEVATOR_FALL_OFFSET_SECS,
+            "Started Anomalously Skilled timer from the R-4 elevator fall fallback"
+        );
+    }
 }
 
 impl SignalHandler for CombatSignalHandler {
@@ -639,6 +695,14 @@ impl SignalHandler for CombatSignalHandler {
             }
         }
 
+        if let GameSignal::FallingDamage {
+            entity_id,
+            entity_type,
+            ..
+        } = signal
+        {
+            self.try_start_r4_elevator_fall_timer(*entity_id, *entity_type, encounter);
+        }
         self.try_start_r4_anomalously_skilled_timer(encounter);
 
         match signal {

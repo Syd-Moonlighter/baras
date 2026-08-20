@@ -4,12 +4,20 @@ use baras_core::{Position, game_data::Difficulty};
 
 pub(super) const R4_AREA_ID: i64 = 833_571_547_775_799;
 pub(super) const TIMER_NAME: &str = "Anomalously Skilled";
+pub(super) const ELEVATOR_FALL_OFFSET_SECS: u64 = 5;
 
 const START_LINE_X: f32 = 288.0;
 const MIN_Y: f32 = 8.0;
 const MAX_Y: f32 = 23.0;
 const MIN_Z: f32 = 424.0;
 const MAX_Z: f32 = 431.0;
+
+const ELEVATOR_MIN_X: f32 = 245.0;
+const ELEVATOR_MAX_X: f32 = 266.0;
+const ELEVATOR_MIN_Y: f32 = 10.0;
+const ELEVATOR_MAX_Y: f32 = 24.0;
+const ELEVATOR_MIN_Z: f32 = 395.0;
+const ELEVATOR_MAX_Z: f32 = 431.0;
 
 pub(super) fn matches_player_position(
     area_id: Option<i64>,
@@ -26,6 +34,24 @@ pub(super) fn matches_player_position(
         && position.y <= MAX_Y
         && position.z >= MIN_Z
         && position.z <= MAX_Z
+}
+
+pub(super) fn matches_elevator_fall(
+    area_id: Option<i64>,
+    difficulty: Option<Difficulty>,
+    position: Position,
+) -> bool {
+    area_id == Some(R4_AREA_ID)
+        && matches!(
+            difficulty,
+            Some(Difficulty::Veteran8 | Difficulty::Veteran16)
+        )
+        && position.x >= ELEVATOR_MIN_X
+        && position.x <= ELEVATOR_MAX_X
+        && position.y >= ELEVATOR_MIN_Y
+        && position.y <= ELEVATOR_MAX_Y
+        && position.z >= ELEVATOR_MIN_Z
+        && position.z <= ELEVATOR_MAX_Z
 }
 
 #[cfg(test)]
@@ -92,6 +118,52 @@ mod tests {
             Some(0),
             Some(Difficulty::Veteran8),
             crossed,
+        ));
+    }
+
+    #[test]
+    fn observed_elevator_falls_match() {
+        for fall in [
+            position(259.19, 15.08, 426.98),
+            position(256.72, 13.49, 408.02),
+            position(257.42, 14.82, 397.45),
+        ] {
+            assert!(matches_elevator_fall(
+                Some(R4_AREA_ID),
+                Some(Difficulty::Veteran8),
+                fall,
+            ));
+        }
+    }
+
+    #[test]
+    fn unrelated_falls_do_not_match() {
+        for fall in [
+            position(-108.94, 165.50, 354.70),
+            position(-25.37, -9.14, -208.65),
+            position(257.42, 14.82, 390.0),
+        ] {
+            assert!(!matches_elevator_fall(
+                Some(R4_AREA_ID),
+                Some(Difficulty::Veteran8),
+                fall,
+            ));
+        }
+    }
+
+    #[test]
+    fn elevator_fall_requires_r4_veteran() {
+        let fall = position(257.42, 14.82, 397.45);
+
+        assert!(!matches_elevator_fall(
+            Some(R4_AREA_ID),
+            Some(Difficulty::Master8),
+            fall,
+        ));
+        assert!(!matches_elevator_fall(
+            Some(0),
+            Some(Difficulty::Veteran8),
+            fall,
         ));
     }
 }

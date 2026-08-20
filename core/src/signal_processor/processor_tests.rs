@@ -97,6 +97,7 @@ fn signal_type_name(signal: &GameSignal) -> &'static str {
         GameSignal::EffectChargesChanged { .. } => "EffectChargesChanged",
         GameSignal::AbilityActivated { .. } => "AbilityActivated",
         GameSignal::DamageTaken { .. } => "DamageTaken",
+        GameSignal::FallingDamage { .. } => "FallingDamage",
         GameSignal::HealingDone { .. } => "HealingDone",
         GameSignal::TargetChanged { .. } => "TargetChanged",
         GameSignal::TargetCleared { .. } => "TargetCleared",
@@ -113,6 +114,30 @@ fn signal_type_name(signal: &GameSignal) -> &'static str {
         GameSignal::TimerExpired { .. } => "TimerExpired",
         GameSignal::TimerCanceled { .. } => "TimerCanceled",
     }
+}
+
+#[test]
+fn falling_damage_emits_player_signal() {
+    const PLAYER_ID: i64 = 690_556_554_797_568;
+
+    let parser = LogParser::new(chrono::Local::now().naive_local());
+    let mut processor = EventProcessor::new();
+    let mut cache = SessionCache::default();
+    let line = "[20:46:37.617] [@Pwincess Declan#690556554797568|(259.19,15.08,426.98,95.92)|(154836/443782)] [] [] [Event {836045448945472}: FallingDamage {836045448945484}] (288946.0)";
+
+    let event = parser
+        .parse_line(1, line)
+        .expect("FallingDamage should parse");
+    let (signals, _, _) = processor.process_event(event, &mut cache);
+
+    assert!(signals.iter().any(|signal| matches!(
+        signal,
+        GameSignal::FallingDamage {
+            entity_id: PLAYER_ID,
+            entity_type: crate::combat_log::EntityType::Player,
+            ..
+        }
+    )));
 }
 
 #[test]
