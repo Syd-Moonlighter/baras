@@ -664,6 +664,9 @@ impl SignalHandler for CombatSignalHandler {
                         .pvp_ocr_roster_started_at
                         .lock()
                         .unwrap_or_else(|p| p.into_inner()) = Some(*timestamp);
+                    // The overlay renders its own copy of the slots; without a
+                    // refresh it keeps showing the previous group's assignments.
+                    let _ = self.cmd_tx.try_send(ServiceCommand::RefreshRaidFrames);
                     info!(area_id, "Cleared OCR roster on entering a new PvP area");
                 } else if is_live && *area_id != current {
                     *self
