@@ -118,8 +118,8 @@ fn truncated_names_match_full_log_names() {
 #[test]
 fn unidentified_middle_character_keeps_a_strong_match() {
     let candidates = build(&[("Catzoon", 100_000, 100_000)]);
-    // The OCR placeholder is removed by normalization, leaving CAZOON. The
-    // remaining letters still align exactly once the missing T is allowed for.
+    // The OCR placeholder survives normalization as a wildcard: the glyph's
+    // presence is kept, only its identity is unknown.
     let rows = vec![row(0, Some("CA?ZOON"), None, None)];
 
     let result = assign_rows(&rows, &candidates, &MatchConfig::default());
@@ -136,6 +136,34 @@ fn unidentified_character_does_not_choose_between_lookalikes() {
         ("Carzoon", 100_000, 100_000),
     ]);
     let rows = vec![row(0, Some("CA?ZOON"), None, None)];
+
+    assert!(assign_rows(&rows, &candidates, &MatchConfig::default()).is_empty());
+}
+
+#[test]
+fn a_full_read_beats_a_prefix_candidate() {
+    // ALPHA also fits the reading if RHO were junk, but the exact match must
+    // lead by enough to assign.
+    let candidates = build(&[
+        ("Alpha", 100_000, 100_000),
+        ("Alpharho", 100_000, 100_000),
+    ]);
+    let rows = vec![row(0, Some("ALPHARHO"), None, None)];
+
+    let result = assign_rows(&rows, &candidates, &MatchConfig::default());
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].name, "Alpharho");
+}
+
+#[test]
+fn a_prefix_read_cannot_choose_between_a_name_and_its_extension() {
+    // A frame showing ALPHA really could be Alpharho with its tail occluded.
+    let candidates = build(&[
+        ("Alpha", 100_000, 100_000),
+        ("Alpharho", 100_000, 100_000),
+    ]);
+    let rows = vec![row(0, Some("ALPHA"), None, None)];
 
     assert!(assign_rows(&rows, &candidates, &MatchConfig::default()).is_empty());
 }

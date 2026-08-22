@@ -98,6 +98,11 @@ fn strip_log_decoration(name: &str) -> &str {
     }
 }
 
+/// OCR's marker for a glyph it detected but could not identify. Kept by
+/// [`normalize_ocr`] as a wildcard for the matcher; SWTOR names cannot contain
+/// it, so [`normalize`]d log names never do.
+pub const WILDCARD: u8 = b'?';
+
 /// Normalize a name for comparison.
 ///
 /// Applies, in order: log-decoration stripping, ASCII folding, uppercasing, and
@@ -110,10 +115,31 @@ fn strip_log_decoration(name: &str) -> &str {
 /// assert_eq!(normalize("Tést Bravo"), "TESTBRAVO");
 /// ```
 pub fn normalize(name: &str) -> String {
+    normalize_impl(name, false)
+}
+
+/// [`normalize`] for OCR readings: `?` survives as a [`WILDCARD`]. Dropping it
+/// would erase the position of a glyph the OCR *did* detect, turning "one
+/// unreadable letter" into "one letter short" for the matcher.
+pub fn normalize_ocr(name: &str) -> String {
+    normalize_impl(name, true)
+}
+
+/// Letters actually identified in a normalized reading — wildcards mark a
+/// glyph's presence, not its identity, so they do not count toward minimums.
+pub fn identified_len(normalized: &str) -> usize {
+    normalized.bytes().filter(|&b| b != WILDCARD).count()
+}
+
+fn normalize_impl(name: &str, keep_wildcard: bool) -> String {
     let stripped = strip_log_decoration(name);
     let mut out = String::with_capacity(stripped.len());
 
     for c in stripped.chars() {
+        if keep_wildcard && c == WILDCARD as char {
+            out.push(c);
+            continue;
+        }
         let folded = fold_char(c);
         // `ß → s` and similar produce ASCII directly; uppercase after folding so
         // multi-char uppercase mappings cannot reintroduce non-ASCII.

@@ -20,6 +20,9 @@ fn folds_accents_seen_in_player_names() {
     assert_eq!(normalize("Éxample"), "EXAMPLE");
     assert_eq!(normalize("Földgåme"), "FOLDGAME");
     assert_eq!(normalize("Bõt"), "BOT");
+    // The stroke is part of the letter, not a diacritic, but it folds the same.
+    assert_eq!(normalize("Højdepunkt"), "HOJDEPUNKT");
+    assert_eq!(normalize("ØRNEN"), "ORNEN");
 }
 
 #[test]

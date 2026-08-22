@@ -2,8 +2,9 @@
 //!
 //! Ambiguous rows stay empty. A missed row is cheaper than a wrong one.
 
+use super::alignment::align_score;
 use super::candidates::PlayerCandidate;
-use super::normalize::{normalize, similarity};
+use super::normalize::{identified_len, normalize_ocr, similarity};
 use super::{MIN_NAME_CONFIDENCE, MIN_OCR_NAME_CHARS};
 
 /// What OCR found in one raid-frame row.
@@ -76,11 +77,12 @@ const STRONG_HEALTH: f32 = 0.75;
 
 /// Score recognized name text against a normalized log name.
 ///
-/// SWTOR clips long names at a fixed pixel width, so a shorter reading is
-/// compared against the candidate's prefix rather than penalized for being
-/// short — `TESTCHARL` matches `TESTCHARLIELONG` on its first nine characters.
+/// The clipping, junk, wildcard and misread cases all live in one alignment —
+/// see [`align_score`]. `TESTCHARL` matches `TESTCHARLIELONG` on its first
+/// nine characters, whether the tail was clipped by the frame or hidden
+/// behind another UI element.
 pub fn name_similarity(observed: &str, target: &str) -> Option<f32> {
-    if target.is_empty() || observed.len() < MIN_OCR_NAME_CHARS {
+    if target.is_empty() || identified_len(observed) < MIN_OCR_NAME_CHARS {
         return None;
     }
     if observed == target {
@@ -88,26 +90,13 @@ pub fn name_similarity(observed: &str, target: &str) -> Option<f32> {
     }
 
     // The crop's left edge sometimes yields a stray glyph that normalization
-    // keeps because it reads as a letter — `ISOA` for `SOA`. Only an exact match
-    // on the remainder counts, so this can never inflate the score of a
-    // genuinely different candidate.
+    // keeps because it reads as a letter — `ISOA` for `SOA`. An exact match on
+    // the remainder is certainty; the alignment only discounts it.
     if observed.len() > MIN_OCR_NAME_CHARS && &observed[1..] == target {
         return Some(1.0);
     }
 
-    // Normalized names are ASCII, so byte slicing is safe. Compare one extra target
-    // character so a dropped OCR glyph only counts as one omission.
-    if observed.len() < target.len() {
-        let clipped = similarity(observed, &target[..observed.len()]);
-        let one_missing = similarity(observed, &target[..observed.len() + 1]);
-        Some(clipped.max(one_missing))
-    } else if observed.len() > target.len() && target.len() >= MIN_OCR_NAME_CHARS {
-        // Markers and status icons sometimes leave junk after an otherwise good
-        // read. Compare the candidate-length prefix as well as the whole line.
-        Some(similarity(observed, target).max(similarity(&observed[..target.len()], target)))
-    } else {
-        Some(similarity(observed, target))
-    }
+    Some(align_score(observed, target))
 }
 
 fn name_score(observed: &str, candidate: &PlayerCandidate) -> Option<f32> {
@@ -284,14 +273,15 @@ pub fn assign_rows_explained(
         return (Vec::new(), Vec::new());
     }
 
-    // Normalize each reading once rather than per candidate.
+    // Normalize each reading once rather than per candidate. A read that is
+    // nothing but wildcards carries no name at all.
     let normalized: Vec<Option<String>> = observations
         .iter()
         .map(|o| {
             o.name_text
                 .as_deref()
-                .map(normalize)
-                .filter(|n| !n.is_empty())
+                .map(normalize_ocr)
+                .filter(|n| identified_len(n) > 0)
         })
         .collect();
 

@@ -2,6 +2,7 @@
 //!
 //! Capture and recognition live elsewhere so matching stays cheap to test.
 
+mod alignment;
 mod candidates;
 mod matching;
 mod normalize;
@@ -16,7 +17,7 @@ pub use matching::{
     CandidateScore, Contribution, HEALTH_RESCUE_FLOOR, MatchConfig, RowAssignment, RowDecision,
     RowObservation, Rejection, assign_rows, assign_rows_explained, name_similarity,
 };
-pub use normalize::{edit_distance, normalize, similarity};
+pub use normalize::{edit_distance, identified_len, normalize, normalize_ocr, similarity};
 
 /// OCR readings shorter than this are too easy to get from background noise.
 pub const MIN_OCR_NAME_CHARS: usize = 3;

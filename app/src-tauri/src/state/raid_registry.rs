@@ -86,7 +86,7 @@ impl RaidSlotRegistry {
         let provisional_slot = self
             .provisionals()
             .filter_map(|(slot, provisional)| {
-                let read = baras_core::raid_detect::normalize(provisional);
+                let read = baras_core::raid_detect::normalize_ocr(provisional);
                 Some((slot, name_match(&read, &normalized)?))
             })
             .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -145,13 +145,14 @@ impl RaidSlotRegistry {
 
         for (slot, name) in assignments {
             let name = name.trim();
-            let normalized = baras_core::raid_detect::normalize(name);
+            let normalized = baras_core::raid_detect::normalize_ocr(name);
             if slot as usize >= self.slots.len()
                 || matches!(
                     self.slots[slot as usize].occupant,
                     Some(SlotOccupant::Player(_))
                 )
-                || normalized.len() < baras_core::raid_detect::MIN_OCR_NAME_CHARS
+                || baras_core::raid_detect::identified_len(&normalized)
+                    < baras_core::raid_detect::MIN_OCR_NAME_CHARS
                 || registered
                     .iter()
                     .any(|log| name_match(&normalized, log).is_some())
