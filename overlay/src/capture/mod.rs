@@ -16,6 +16,18 @@ use unix as backend;
 /// callers can hide detection UI rather than fail at press time.
 pub const SUPPORTED: bool = cfg!(any(target_os = "windows", all(unix, not(target_os = "macos"))));
 
+fn log_backend(backend: &str, direct_supported: bool) {
+    static LOGGED: std::sync::Once = std::sync::Once::new();
+    LOGGED.call_once(|| {
+        tracing::info!(
+            target: "baras::capture",
+            backend,
+            direct_supported,
+            "screen capture backend selected"
+        );
+    });
+}
+
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 mod backend {
     use super::{CaptureError, CapturedImage};
@@ -159,6 +171,8 @@ pub enum CaptureError {
     ConnectionFailed(String),
     /// The platform or compositor does not support region capture.
     Unsupported(String),
+    /// Screen capture needs user approval.
+    PermissionRequired(String),
     /// Requested region is empty or off-screen.
     InvalidRegion(String),
     /// Capture was attempted but produced nothing usable.
@@ -170,10 +184,45 @@ impl std::fmt::Display for CaptureError {
         match self {
             CaptureError::ConnectionFailed(s) => write!(f, "Capture connection failed: {s}"),
             CaptureError::Unsupported(s) => write!(f, "Capture unsupported: {s}"),
+            CaptureError::PermissionRequired(s) => write!(f, "Capture permission required: {s}"),
             CaptureError::InvalidRegion(s) => write!(f, "Invalid capture region: {s}"),
             CaptureError::Failed(s) => write!(f, "Capture failed: {s}"),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn portal_required() -> bool {
+    unix::portal_required()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn portal_required() -> bool {
+    #[cfg(target_os = "windows")]
+    log_backend("windows-gdi", true);
+    #[cfg(target_os = "macos")]
+    log_backend("none", false);
+    false
+}
+
+#[cfg(target_os = "linux")]
+pub fn has_portal_restore_token() -> bool {
+    unix::has_portal_restore_token()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn has_portal_restore_token() -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+pub async fn enable_portal() -> Result<(), CaptureError> {
+    unix::enable_portal().await
+}
+
+#[cfg(not(target_os = "linux"))]
+pub async fn enable_portal() -> Result<(), CaptureError> {
+    Err(CaptureError::Unsupported("screen cast portal is only available on Linux".into()))
 }
 
 impl std::error::Error for CaptureError {}

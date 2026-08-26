@@ -887,9 +887,12 @@ impl RaidOverlay {
             Ok(image) => Some(image),
             Err(e) => {
                 tracing::warn!("Raid frame capture failed: {e}");
-                // An unsupported compositor is permanent: retrying cannot
-                // help, and saying "failed" would invite retries.
                 let message = match e {
+                    crate::capture::CaptureError::PermissionRequired(_) => {
+                        self.pending_registry_actions
+                            .push(RaidRegistryAction::CapturePermissionRequired);
+                        "Screen capture permission required"
+                    }
                     crate::capture::CaptureError::Unsupported(_) => {
                         "Capture not supported by this compositor: assign names manually"
                     }

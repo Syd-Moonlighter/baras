@@ -151,6 +151,15 @@ pub fn App() -> Element {
     let mut changelog_open = use_signal(|| false);
     let mut changelog_html = use_signal(String::new);
     let mut contributors_open = use_signal(|| false);
+    let mut screen_capture_permission_open = use_signal(|| false);
+    let mut screen_capture_starting = use_signal(|| false);
+    let mut screen_capture_error = use_signal(|| None::<String>);
+
+    use_future(move || async move {
+        if api::prepare_screen_capture().await {
+            screen_capture_permission_open.set(true);
+        }
+    });
 
     // Audio settings
     let mut audio_enabled = use_signal(|| true);
@@ -287,6 +296,17 @@ pub fn App() -> Element {
             }
         });
         api::tauri_listen("active-file-changed", &closure).await;
+        closure.forget();
+    });
+
+    use_future(move || async move {
+        let closure = Closure::new(move |_event: JsValue| {
+            let _ = screen_capture_error.try_write().map(|mut value| *value = None);
+            let _ = screen_capture_permission_open
+                .try_write()
+                .map(|mut value| *value = true);
+        });
+        api::tauri_listen("screen-capture-permission-required", &closure).await;
         closure.forget();
     });
 
@@ -2781,6 +2801,72 @@ pub fn App() -> Element {
                                     });
                                 },
                                 "Got it!"
+                            }
+                        }
+                    }
+                }
+            }
+
+            if screen_capture_permission_open() {
+                div {
+                    class: "modal-backdrop",
+                    div {
+                        class: "changelog-modal screen-capture-modal",
+                        onclick: move |e| e.stop_propagation(),
+                        div { class: "changelog-header screen-capture-header",
+                            h3 {
+                                i { class: "fa-solid fa-display" }
+                                " Screen capture permission"
+                            }
+                            button {
+                                class: "btn btn-close",
+                                disabled: screen_capture_starting(),
+                                onclick: move |_| screen_capture_permission_open.set(false),
+                                "X"
+                            }
+                        }
+                        div { class: "screen-capture-content",
+                            p { "BARAS needs access to your screen to detect raid-frame names." }
+                            p {
+                                "Your desktop doesn't support BARAS's direct capture method. KDE will ask you to choose the monitor where SWTOR is running."
+                            }
+                            div { class: "screen-capture-note",
+                                i { class: "fa-solid fa-shield-halved" }
+                                div {
+                                    strong { "What BARAS captures" }
+                                    span { "Only the configured raid-frame area is processed for OCR. Debug captures are saved only when OCR debug dumps are enabled." }
+                                }
+                            }
+                            if let Some(error) = screen_capture_error() {
+                                div { class: "screen-capture-error", "{error}" }
+                            }
+                        }
+                        div { class: "screen-capture-footer",
+                            button {
+                                class: "btn btn-secondary",
+                                disabled: screen_capture_starting(),
+                                onclick: move |_| screen_capture_permission_open.set(false),
+                                "Not now"
+                            }
+                            button {
+                                class: "btn btn-primary",
+                                disabled: screen_capture_starting(),
+                                onclick: move |_| {
+                                    screen_capture_starting.set(true);
+                                    screen_capture_error.set(None);
+                                    spawn(async move {
+                                        match api::enable_screen_capture().await {
+                                            Ok(()) => screen_capture_permission_open.set(false),
+                                            Err(error) if error.to_lowercase().contains("declined") => {
+                                                screen_capture_permission_open.set(false);
+                                            }
+                                            Err(error) => screen_capture_error.set(Some(error)),
+                                        }
+                                        screen_capture_starting.set(false);
+                                    });
+                                },
+                                i { class: "fa-solid fa-display" }
+                                if screen_capture_starting() { " Waiting..." } else { " Choose monitor" }
                             }
                         }
                     }

@@ -125,7 +125,7 @@ fn capture_with_dc(
             ))
         } else {
             super::log_timing(
-                "gdi",
+                "windows-gdi",
                 setup,
                 captured,
                 crop_started.elapsed(),

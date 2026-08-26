@@ -12,6 +12,7 @@ use crate::overlay::{
 use crate::service::{OverlayUpdate, ServiceHandle};
 use crate::state::SharedState;
 use baras_overlay::{OverlayData, RaidRegistryAction};
+use tauri::{Emitter, Manager};
 use tokio::sync::{Semaphore, mpsc};
 
 /// Spawn the overlay update router task.
@@ -101,6 +102,16 @@ async fn process_registry_action(
         }
         RaidRegistryAction::ClearAll => {
             service_handle.clear_raid_registry().await;
+        }
+        RaidRegistryAction::CapturePermissionRequired => {
+            if let Some(window) = service_handle.app_handle.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+            let _ = service_handle
+                .app_handle
+                .emit("screen-capture-permission-required", ());
         }
         RaidRegistryAction::DetectNames {
             started_at,

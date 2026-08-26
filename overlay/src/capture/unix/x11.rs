@@ -72,7 +72,7 @@ pub fn capture_region(
     }
 
     super::log_timing(
-        "x11",
+        "x11-get-image",
         std::time::Duration::ZERO,
         captured,
         converted.elapsed(),

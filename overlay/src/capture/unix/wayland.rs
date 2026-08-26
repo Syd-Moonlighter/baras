@@ -37,6 +37,26 @@ use super::{CaptureError, CapturedImage, device_region};
 /// stopped answering. Without it the overlay thread would hang for good.
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+pub fn supported() -> bool {
+    let Ok(conn) = Connection::connect_to_env() else {
+        return false;
+    };
+    let Ok((globals, _)) = registry_queue_init::<Capture>(&conn) else {
+        return false;
+    };
+    let required = [
+        WlShm::interface().name,
+        ZxdgOutputManagerV1::interface().name,
+        ExtOutputImageCaptureSourceManagerV1::interface().name,
+        ExtImageCopyCaptureManagerV1::interface().name,
+    ];
+    globals.contents().with_list(|list| {
+        required
+            .iter()
+            .all(|name| list.iter().any(|global| global.interface == *name))
+    })
+}
+
 pub fn capture_region(
     x: i32,
     y: i32,
@@ -54,8 +74,7 @@ pub fn capture_region(
 
     let missing = |what: &str| {
         CaptureError::Unsupported(format!(
-            "compositor does not implement {what}; raid-frame capture needs \
-             ext-image-copy-capture-v1 (KWin 6.6+, Mutter 49.2+, Hyprland 0.52.1+, Sway 1.11+)"
+            "compositor does not implement {what}"
         ))
     };
     let shm: WlShm = globals.bind(&qh, 1..=1, ()).map_err(|_| missing("wl_shm"))?;
@@ -198,7 +217,7 @@ pub fn capture_region(
     }
 
     super::log_timing(
-        "wayland",
+        "wayland-ext-image-copy",
         setup,
         captured,
         crop_started.elapsed(),

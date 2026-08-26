@@ -79,6 +79,8 @@ pub enum RaidRegistryAction {
     ClearSlot(u8),
     /// Clear every slot
     ClearAll,
+    /// Ask the app to open screen capture permission.
+    CapturePermissionRequired,
     /// Captured pixels and overlay-local slot rectangles.
     DetectNames {
         started_at: std::time::Instant,

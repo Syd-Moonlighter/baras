@@ -249,6 +249,8 @@ pub fn run() {
             commands::start_operation_timer,
             commands::stop_operation_timer,
             commands::reset_operation_timer,
+            commands::prepare_screen_capture,
+            commands::enable_screen_capture,
             // Service commands
             commands::get_log_files,
             commands::start_tailing,

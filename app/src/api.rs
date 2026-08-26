@@ -104,6 +104,16 @@ pub async fn is_wayland_session() -> bool {
     from_js(result).unwrap_or(false)
 }
 
+pub async fn prepare_screen_capture() -> bool {
+    let result = invoke("prepare_screen_capture", JsValue::NULL).await;
+    from_js(result).unwrap_or(false)
+}
+
+pub async fn enable_screen_capture() -> Result<(), String> {
+    try_invoke("enable_screen_capture", JsValue::NULL).await?;
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Overlay Commands
 // ─────────────────────────────────────────────────────────────────────────────

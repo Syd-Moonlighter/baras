@@ -60,6 +60,25 @@ pub struct OverlayStatusResponse {
     pub auto_hidden: bool,
 }
 
+#[tauri::command]
+pub async fn prepare_screen_capture() -> bool {
+    if !baras_overlay::capture::portal_required() {
+        return false;
+    }
+    if !baras_overlay::capture::has_portal_restore_token() {
+        tracing::info!(target: "baras::capture", "screen capture permission required");
+        return true;
+    }
+    baras_overlay::capture::enable_portal().await.is_err()
+}
+
+#[tauri::command]
+pub async fn enable_screen_capture() -> Result<(), String> {
+    baras_overlay::capture::enable_portal()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Show/Hide Commands
 // ─────────────────────────────────────────────────────────────────────────────

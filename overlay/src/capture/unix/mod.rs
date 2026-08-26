@@ -2,6 +2,8 @@
 
 mod wayland;
 mod x11;
+#[cfg(target_os = "linux")]
+mod portal;
 
 use super::{CaptureError, CapturedImage, log_timing};
 
@@ -14,10 +16,43 @@ pub fn capture_region(
     // Same test the overlay window uses, so the two can never disagree: an X11
     // GetImage cannot read a Wayland session's surfaces.
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        wayland::capture_region(x, y, width, height)
+        match wayland::capture_region(x, y, width, height) {
+            Ok(image) => Ok(image),
+            #[cfg(target_os = "linux")]
+            Err(CaptureError::Unsupported(_)) => portal::capture_region(x, y, width, height),
+            Err(error) => Err(error),
+        }
     } else {
         x11::capture_region(x, y, width, height)
     }
+}
+
+#[cfg(target_os = "linux")]
+pub fn portal_required() -> bool {
+    if std::env::var("WAYLAND_DISPLAY").is_err() {
+        super::log_backend("x11-get-image", true);
+        return false;
+    }
+    let direct_supported = wayland::supported();
+    super::log_backend(
+        if direct_supported {
+            "wayland-ext-image-copy"
+        } else {
+            "pipewire-portal"
+        },
+        direct_supported,
+    );
+    !direct_supported
+}
+
+#[cfg(target_os = "linux")]
+pub fn has_portal_restore_token() -> bool {
+    portal::has_restore_token()
+}
+
+#[cfg(target_os = "linux")]
+pub async fn enable_portal() -> Result<(), CaptureError> {
+    portal::enable().await
 }
 
 /// Map a global logical rectangle onto an output's capture buffer.

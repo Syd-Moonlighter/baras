@@ -3594,6 +3594,62 @@ details[open] .collapsible-summary::before {
   box-shadow: 0 4px 12px rgba(255, 215, 0, 0.3);
 }
 
+.screen-capture-modal {
+  max-width: 560px;
+}
+
+.screen-capture-header h3,
+.screen-capture-header h3 i {
+  color: var(--swtor-blue);
+}
+
+.screen-capture-content {
+  padding: 1.25em;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.screen-capture-content p:first-child {
+  margin-top: 0;
+  color: var(--text-primary);
+}
+
+.screen-capture-note {
+  display: flex;
+  gap: 0.75em;
+  margin-top: 1em;
+  padding: 0.9em;
+  background: var(--blue-alpha-10);
+  border: 1px solid var(--blue-alpha-20);
+  border-radius: var(--radius-md);
+}
+
+.screen-capture-note i {
+  color: var(--swtor-blue);
+}
+
+.screen-capture-note div,
+.screen-capture-note span {
+  display: block;
+}
+
+.screen-capture-note strong {
+  color: var(--text-primary);
+}
+
+.screen-capture-error {
+  margin-top: 1em;
+  color: var(--color-error);
+}
+
+.screen-capture-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75em;
+  padding: 1em 1.25em;
+  border-top: 1px solid var(--blue-alpha-15);
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    Contributors Modal
    ───────────────────────────────────────────────────────────────────────────── */
