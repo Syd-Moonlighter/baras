@@ -64,6 +64,7 @@ pub use baras_types::{
     UsageSortColumn,
     ViewMode,
     MAX_PROFILES,
+    WEB_OVERLAY_URL,
 };
 
 // Type alias for context-specific trigger usage

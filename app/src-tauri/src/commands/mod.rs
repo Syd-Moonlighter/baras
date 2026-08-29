@@ -18,6 +18,7 @@ mod overlay;
 mod parsely;
 mod query;
 mod service;
+mod stream_overlay;
 mod url;
 
 // Re-export all commands for the invoke_handler
@@ -27,4 +28,5 @@ pub use overlay::*;
 pub use parsely::*;
 pub use query::*;
 pub use service::*;
+pub use stream_overlay::*;
 pub use url::*;

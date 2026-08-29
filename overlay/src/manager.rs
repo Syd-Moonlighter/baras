@@ -314,6 +314,11 @@ impl OverlayWindow {
         self.platform.commit();
     }
 
+    /// Copy the final premultiplied RGBA pixels for non-window consumers.
+    pub fn snapshot_rgba(&mut self) -> Option<Vec<u8>> {
+        self.platform.pixel_buffer().map(|pixels| pixels.to_vec())
+    }
+
     /// Poll for events (non-blocking)
     /// Returns false if the window should close
     pub fn poll_events(&mut self) -> bool {

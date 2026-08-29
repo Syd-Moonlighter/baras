@@ -3328,6 +3328,9 @@ impl ParselySettings {
 /// Note: Persistence methods (load/save) are provided by baras-core via the
 /// `AppConfigExt` trait, as they require platform-specific dependencies.
 /// The frontend derives Default (getting empty values) which is fine for deserialization.
+pub const WEB_OVERLAY_PORT: u16 = 49684;
+pub const WEB_OVERLAY_URL: &str = "http://127.0.0.1:49684/overlay";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -3342,6 +3345,9 @@ pub struct AppConfig {
     pub log_retention_days: u32,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
+    /// Serve the currently visible native overlays on a loopback-only web page.
+    #[serde(default)]
+    pub web_overlay_enabled: bool,
     #[serde(default)]
     pub overlay_settings: OverlaySettings,
     #[serde(default)]
@@ -3433,6 +3439,7 @@ impl AppConfig {
             auto_delete_old_files: false,
             log_retention_days: 21,
             minimize_to_tray: false,
+            web_overlay_enabled: false,
             overlay_settings: OverlaySettings::default(),
             hotkeys: HotkeySettings::default(),
             profiles: Vec::new(),

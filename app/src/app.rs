@@ -14,7 +14,7 @@ use crate::components::{
 use crate::components::class_icons::{get_class_icon, get_role_icon};
 use crate::types::{
     AreaVisitInfo, LogFileInfo, MainTab, MetricType, OverlaySettings, OverlayStatus, OverlayType,
-    SessionInfo, UiSessionState, UpdateInfo,
+    SessionInfo, UiSessionState, UpdateInfo, WEB_OVERLAY_URL,
 };
 
 static CSS: Asset = asset!("/assets/styles.css");
@@ -140,6 +140,7 @@ pub fn App() -> Element {
 
     // Application settings
     let mut minimize_to_tray = use_signal(|| true);
+    let mut web_overlay_enabled = use_signal(|| false);
     let mut european_number_format = use_signal(|| false);
     let mut app_version = use_signal(String::new);
 
@@ -213,6 +214,7 @@ pub fn App() -> Element {
             ocr_debug_dump.set(config.ocr_debug_dump);
             ocr_debug_max_dumps.set(config.ocr_debug_max_dumps);
             minimize_to_tray.set(config.minimize_to_tray);
+            web_overlay_enabled.set(config.web_overlay_enabled);
             european_number_format.set(config.european_number_format);
             parsely_username.set(config.parsely.username);
             parsely_password.set(config.parsely.password);
@@ -2072,6 +2074,29 @@ pub fn App() -> Element {
                                     }
                                 }
                                 p { class: "hint", "When enabled, closing the window hides to system tray instead of quitting." }
+                                div { class: "setting-row",
+                                    label { "Web overlay" }
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: web_overlay_enabled(),
+                                        onchange: move |e| {
+                                            let checked = e.checked();
+                                            let previous = web_overlay_enabled();
+                                            web_overlay_enabled.set(checked);
+                                            let mut toast = use_toast();
+                                            spawn(async move {
+                                                if let Err(err) = api::set_web_overlay_enabled(checked).await {
+                                                    web_overlay_enabled.set(previous);
+                                                    toast.show(format!("Failed to change web overlay: {}", err), ToastSeverity::Normal);
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                                p { class: "hint", "Mirror the Baras overlays currently shown into any streaming software with a browser source." }
+                                if web_overlay_enabled() {
+                                    code { class: "web-overlay-url", "{WEB_OVERLAY_URL}" }
+                                }
                                 div { class: "setting-row",
                                     label { "European number format" }
                                     input {
