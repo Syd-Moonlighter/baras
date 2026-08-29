@@ -94,7 +94,7 @@ const OVERLAY_PAGE: &str = r#"<!doctype html>
         clearScene();
       }
 
-      window.requestAnimationFrame(refresh);
+      window.setTimeout(refresh, 100);
     }
 
     refresh();
@@ -387,6 +387,5 @@ mod tests {
     fn overlay_page_is_transparent() {
         assert!(OVERLAY_PAGE.contains("background: transparent"));
         assert!(OVERLAY_PAGE.contains("fetch('/scene'"));
-        assert!(OVERLAY_PAGE.contains("requestAnimationFrame(refresh)"));
     }
 }
