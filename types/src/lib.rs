@@ -3328,8 +3328,10 @@ impl ParselySettings {
 /// Note: Persistence methods (load/save) are provided by baras-core via the
 /// `AppConfigExt` trait, as they require platform-specific dependencies.
 /// The frontend derives Default (getting empty values) which is fine for deserialization.
-pub const WEB_OVERLAY_PORT: u16 = 49684;
-pub const WEB_OVERLAY_URL: &str = "http://127.0.0.1:49684/overlay";
+// Keep the fixed browser-source URL below Windows' default TCP range
+// (49152-65535), where outbound connections can otherwise claim the port.
+pub const WEB_OVERLAY_PORT: u16 = 47684;
+pub const WEB_OVERLAY_URL: &str = "http://127.0.0.1:47684/overlay";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
