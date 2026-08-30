@@ -82,6 +82,22 @@ jobs:
           projectPath: app
           tauriScript: cargo tauri
 
+      # Ubuntu's libpipewire hardcodes Debian's SPA plugin directory
+      # (/usr/lib/x86_64-linux-gnu/spa-0.2); bundled into the AppImage it
+      # cannot load its plugins on any non-Debian distro and portal screen
+      # capture dies with "Creation failed". Strip it so the host's own
+      # libpipewire (which knows its own plugin paths) is loaded instead.
+      - name: Strip bundled libpipewire and repack AppImage
+        run: |
+          set -euo pipefail
+          appdir=target/release/bundle/appimage/BARAS.AppDir
+          appimage=$(ls target/release/bundle/appimage/*.AppImage)
+          rm -f "$appdir"/usr/lib/libpipewire-0.3.so*
+          wget -q -O /tmp/appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x /tmp/appimagetool
+          ARCH=x86_64 /tmp/appimagetool "$appdir" "$appimage"
+
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
