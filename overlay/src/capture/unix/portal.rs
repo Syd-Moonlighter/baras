@@ -243,6 +243,8 @@ fn run_stream(
     requests: mpsc::Receiver<CaptureRequest>,
     ready: &mpsc::SyncSender<Result<(), String>>,
 ) -> Result<(), pw::Error> {
+    // Safe to call more than once; the library refuses to work without it.
+    pw::init();
     let thread_loop = unsafe { pw::thread_loop::ThreadLoopBox::new(Some("baras-pipewire"), None)? };
     let context = pw::context::ContextBox::new(thread_loop.loop_(), None)?;
     let core = context.connect_fd(fd, None)?;
@@ -288,6 +290,33 @@ fn run_stream(
             }
         })
         .process(|stream, data| {
+            if data
+                .pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_none()
+            {
+                let _ = stream.set_active(false);
+                return;
+            }
+            let Some(mut buffer) = stream.dequeue_buffer() else {
+                // Spurious wakeup; stay active until a buffer arrives.
+                return;
+            };
+            // KWin wakes consumers with cursor-metadata buffers carrying no
+            // pixels (chunk size 0) even when the cursor is hidden. Skip them
+            // and stay active for the next frame; the caller's timeout is the
+            // backstop if none ever comes.
+            let has_pixels = buffer.datas_mut().first().is_some_and(|pixels| {
+                pixels.chunk().size() > 0
+                    && !pixels
+                        .chunk()
+                        .flags()
+                        .contains(pw::spa::buffer::ChunkFlags::CORRUPTED)
+            });
+            if !has_pixels {
+                return;
+            }
             let Some(request) = data
                 .pending
                 .lock()
@@ -297,13 +326,11 @@ fn run_stream(
                 let _ = stream.set_active(false);
                 return;
             };
-            let result = stream
-                .dequeue_buffer()
-                .ok_or_else(|| CaptureError::Failed("PipeWire returned no buffer".into()))
-                .and_then(|mut buffer| {
-                    let pixels = buffer.datas_mut().first_mut().ok_or_else(|| {
-                        CaptureError::Failed("PipeWire returned an empty buffer".into())
-                    })?;
+            let result = buffer
+                .datas_mut()
+                .first_mut()
+                .ok_or_else(|| CaptureError::Failed("PipeWire returned an empty buffer".into()))
+                .and_then(|pixels| {
                     frame_from_buffer(
                         pixels,
                         &data.format,
@@ -410,13 +437,17 @@ fn frame_from_buffer(
             )
         })?;
     let offset = data.chunk().offset() as usize;
-    let stride = data.chunk().stride();
-    if stride <= 0 {
-        return Err(CaptureError::Unsupported(
-            "PipeWire returned an unsupported row layout".into(),
+    // Some producers leave the chunk stride unset; the chunk size still spans
+    // the whole frame, so the row length can be derived from it instead.
+    let stride = match data.chunk().stride() {
+        stride if stride > 0 => stride as usize,
+        _ => data.chunk().size() as usize / height as usize,
+    };
+    if stride < width as usize * 4 {
+        return Err(CaptureError::Failed(
+            "PipeWire returned an unusable row layout".into(),
         ));
     }
-    let stride = stride as usize;
     let bytes = data
         .data()
         .ok_or_else(|| CaptureError::Failed("PipeWire buffer is not mapped".into()))?;
