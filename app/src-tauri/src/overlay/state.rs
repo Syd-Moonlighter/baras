@@ -32,6 +32,8 @@ pub enum OverlayCommand {
     SetSize(u32, u32),
     /// Request current position via oneshot channel
     GetPosition(tokio::sync::oneshot::Sender<PositionEvent>),
+    /// Publish the current rendered pixels to the optional web overlay.
+    CaptureFrame,
     /// Run raid OCR.
     DetectRaidNames,
     /// Shutdown the overlay

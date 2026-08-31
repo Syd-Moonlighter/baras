@@ -11,7 +11,7 @@ use crate::frame::OverlayFrame;
 use crate::platform::{OverlayConfig, PlatformError};
 use crate::utils::{color_from_rgba, truncate_name};
 use crate::widgets::colors;
-use crate::widgets::{Footer, Header, ProgressBar};
+use crate::widgets::{draw_icon_placeholder, Footer, Header, ProgressBar};
 
 /// Entry in a DPS/HPS metric
 #[derive(Debug, Clone)]
@@ -496,8 +496,11 @@ impl MetricOverlay {
             .sum();
 
         // Icon rendering setup
-        // Discipline icons render full-height and left-aligned (flush to the bar edge);
-        // class icons render slightly inset to leave breathing room around the silhouette.
+        // Discipline icons are opaque squares, so they get a dedicated
+        // full-height column left of the bar — overlaying them would hide the
+        // fill's origin and erase small values entirely. Class icons are
+        // transparent silhouettes and keep overlaying the bar's left edge,
+        // slightly inset for breathing room.
         let is_discipline_icon = self.icon_mode == ClassIconMode::Discipline;
         let (icon_size, icon_padding) = if is_discipline_icon {
             (bar_height, 0.0)
@@ -506,6 +509,15 @@ impl MetricOverlay {
                 bar_height - 4.0 * self.frame.scale_factor(),
                 2.0 * self.frame.scale_factor(),
             )
+        };
+        let icon_overlap = 1.0 * self.frame.scale_factor();
+        let (bar_x, bar_w) = if is_discipline_icon {
+            (
+                padding + icon_size - icon_overlap,
+                content_width - icon_size + icon_overlap,
+            )
+        } else {
+            (padding, content_width)
         };
 
         for (i, entry) in visible_entries.iter().enumerate() {
@@ -566,8 +578,9 @@ impl MetricOverlay {
                 bar = bar.with_bold_text();
             }
 
-            // Add label offset to make room for icon
-            if has_icon {
+            // Overlaid class icons push the label right; the discipline
+            // column already starts the bar past the icon.
+            if has_icon && !is_discipline_icon {
                 bar = bar.with_label_offset(icon_size + icon_padding);
             }
 
@@ -603,39 +616,50 @@ impl MetricOverlay {
 
             bar.render(
                 &mut self.frame,
-                padding,
+                bar_x,
                 y,
-                content_width,
+                bar_w,
                 bar_height,
                 text_font_size,
                 bar_radius,
             );
 
-            // Draw icon on top of bar: discipline icon (raw) or class icon (role-tinted/white)
-            if has_icon {
-                if let Some(icon_name) = icon_name {
-                    let icon = if self.icon_mode == ClassIconMode::Discipline {
-                        crate::class_icons::get_discipline_icon(icon_name)
-                    } else if let Some(role) = entry.role {
-                        crate::class_icons::get_role_colored_class_icon(icon_name, role)
-                    } else {
-                        crate::class_icons::get_white_class_icon(icon_name)
-                    };
-                    if let Some(icon) = icon {
-                        let icon_x = padding + icon_padding;
-                        let icon_y = y + icon_padding;
-
-                        self.frame.draw_image_with_shadow(
-                            &icon.rgba,
-                            icon.width,
-                            icon.height,
-                            icon_x,
-                            icon_y,
-                            icon_size,
-                            icon_size,
-                        );
-                    }
+            // Draw icon: discipline icons fill their reserved column, class
+            // icons draw on top of the bar (role-tinted/white)
+            let mut icon_drawn = false;
+            if let Some(icon_name) = icon_name {
+                let icon = if is_discipline_icon {
+                    crate::class_icons::get_discipline_icon(icon_name)
+                } else if let Some(role) = entry.role {
+                    crate::class_icons::get_role_colored_class_icon(icon_name, role)
+                } else {
+                    crate::class_icons::get_white_class_icon(icon_name)
+                };
+                if let Some(icon) = icon {
+                    self.frame.draw_image_with_shadow(
+                        &icon.rgba,
+                        icon.width,
+                        icon.height,
+                        padding + icon_padding,
+                        y + icon_padding,
+                        icon_size,
+                        icon_size,
+                    );
+                    icon_drawn = true;
                 }
+            }
+            // Keep the reserved column from reading as a hole on rows with
+            // no resolvable discipline icon.
+            if is_discipline_icon && !icon_drawn {
+                draw_icon_placeholder(
+                    &mut self.frame,
+                    padding,
+                    y,
+                    icon_size,
+                    icon_size,
+                    bar_radius,
+                    fill_color,
+                );
             }
 
             y += bar_height + effective_spacing;

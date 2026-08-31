@@ -163,6 +163,18 @@ impl ChallengeOverlay {
         self.frame.set_background_alpha(alpha);
     }
 
+    /// Number of card slots the window is divided into: the reserved count
+    /// when configured (0 = auto), growing only when more challenges than
+    /// that are visible (which compresses cards, like the boss HP overlay).
+    fn slot_count(&self, num_visible: usize) -> usize {
+        let reserved = (self.config.visible_challenges as usize).min(8);
+        if reserved == 0 {
+            num_visible.max(1)
+        } else {
+            reserved.max(num_visible)
+        }
+    }
+
     pub fn render_overlay(&mut self) {
         let width = self.frame.width() as f32;
         let height = self.frame.height() as f32;
@@ -191,17 +203,26 @@ impl ChallengeOverlay {
         let layout = self.config.layout;
 
         // Filter to enabled challenges only - clone to avoid borrow issues
-        // (must happen before begin_frame so we can compute content height for dynamic background)
-        let enabled_challenges: Vec<ChallengeEntry> = self
-            .data
-            .entries
-            .iter()
-            .filter(|c| c.enabled)
-            .take(max_display)
-            .cloned()
-            .collect();
+        // (must happen before begin_frame so we can compute content height for
+        // dynamic background). In move mode, render sample cards instead — one
+        // per reserved slot — so the user sees the true card size and where
+        // reserved slots sit while positioning the window.
+        let enabled_challenges: Vec<ChallengeEntry> = if self.frame.is_in_move_mode() {
+            let reserved = (self.config.visible_challenges as usize).min(8);
+            let n = if reserved > 0 { reserved } else { 2.min(max_display.max(1)) };
+            sample_challenges(n)
+        } else {
+            self.data
+                .entries
+                .iter()
+                .filter(|c| c.enabled)
+                .take(max_display)
+                .cloned()
+                .collect()
+        };
 
         let num_visible = enabled_challenges.len();
+        let slots = self.slot_count(num_visible);
         if num_visible > 0 {
             // Scale content up to fill available space when fewer challenges are shown.
             // Estimate per-card height: header + separator + player bars + optional footer
@@ -221,22 +242,49 @@ impl ChallengeOverlay {
                     0.0
                 };
 
+            // Size against the slot count, not the visible count: with
+            // reserved slots a lone card keeps its 1/N share instead of
+            // scaling up to fill the window.
             let content_height_est = match layout {
                 ChallengeLayout::Vertical => {
-                    num_visible as f32 * card_height_est
-                        + (num_visible.saturating_sub(1)) as f32 * card_spacing
+                    slots as f32 * card_height_est
+                        + (slots.saturating_sub(1)) as f32 * card_spacing
                         + padding * 2.0
                 }
                 ChallengeLayout::Horizontal => card_height_est + padding * 2.0,
             };
 
-            let content_scale = (height / content_height_est).clamp(0.8, 1.8);
+            // With reserved slots, allow more up-scaling than auto mode so a
+            // card genuinely fills its 1/N share of the window instead of
+            // stopping short and leaving whitespace.
+            let max_upscale = if self.config.visible_challenges > 0 {
+                2.5
+            } else {
+                1.8
+            };
+            let content_scale = (height / content_height_est).clamp(0.8, max_upscale);
+
+            // Fonts are additionally capped by card width: horizontal slots
+            // are narrow, and height-driven scaling alone makes the bar text
+            // (name / value / percent) collide and truncate. The 1.5 slack
+            // keeps full-width vertical cards at their familiar sizing.
+            let card_width = match layout {
+                ChallengeLayout::Vertical => width - padding * 2.0,
+                ChallengeLayout::Horizontal => {
+                    (width - padding * 2.0 - card_spacing * slots.saturating_sub(1) as f32)
+                        / slots as f32
+                }
+            };
+            let natural_width = (self.frame.scaled(BASE_WIDTH) - padding * 2.0).max(1.0);
+            let font_content_scale = content_scale
+                .min((card_width / natural_width * 1.5).max(0.5));
+
             bar_height *= content_scale;
             bar_spacing *= content_scale;
-            font_size *= content_scale;
-            header_font_size *= content_scale;
-            duration_font_size *= content_scale;
             bar_radius *= content_scale;
+            font_size *= font_content_scale;
+            header_font_size *= font_content_scale;
+            duration_font_size *= font_content_scale;
         }
 
         // Compute actual content height from final (scaled) dimensions for dynamic background
@@ -287,8 +335,20 @@ impl ChallengeOverlay {
             }
         };
 
+        // Bottom-anchor the card group in vertical layout when stacking from
+        // the end; clamp to the top when content overflows the window.
+        let content_y = if layout == ChallengeLayout::Vertical
+            && self.config.stack_from_end
+            && num_visible > 0
+        {
+            (height - content_height).max(0.0)
+        } else {
+            0.0
+        };
+
         if self.config.dynamic_background {
-            self.frame.begin_frame_with_content_height(content_height);
+            self.frame
+                .begin_frame_with_content_rect(content_y, content_height);
         } else {
             self.frame.begin_frame();
         }
@@ -310,7 +370,7 @@ impl ChallengeOverlay {
                     show_duration,
                     show_footer,
                     width,
-                    height,
+                    content_y + padding,
                 );
             }
             ChallengeLayout::Horizontal => {
@@ -354,10 +414,10 @@ impl ChallengeOverlay {
         show_duration: bool,
         show_footer: bool,
         width: f32,
-        _height: f32,
+        start_y: f32,
     ) {
         let content_width = width - padding * 2.0;
-        let mut y = padding;
+        let mut y = start_y;
 
         for (idx, challenge) in challenges.iter().enumerate() {
             if idx > 0 {
@@ -432,13 +492,25 @@ impl ChallengeOverlay {
             return;
         }
 
-        // Calculate card width for horizontal layout
-        let total_spacing = card_spacing * (num_challenges - 1) as f32;
+        // Card width is the window divided into slots (reserved count when
+        // configured), so a lone card keeps its 1/N share instead of
+        // stretching across the whole window.
+        let slots = self.slot_count(num_challenges);
+        let total_spacing = card_spacing * (slots - 1) as f32;
         let available_width = width - padding * 2.0 - total_spacing;
-        let card_width = available_width / num_challenges as f32;
+        let card_width = available_width / slots as f32;
+
+        // Anchor the card group to the right edge when stacking from the end.
+        let x_start = if self.config.stack_from_end {
+            let group_w = card_width * num_challenges as f32
+                + card_spacing * (num_challenges - 1) as f32;
+            width - padding - group_w
+        } else {
+            padding
+        };
 
         for (idx, challenge) in challenges.iter().enumerate() {
-            let card_x = padding + (card_width + card_spacing) * idx as f32;
+            let card_x = x_start + (card_width + card_spacing) * idx as f32;
             let mut y = padding;
 
             let bar_color = challenge.color.unwrap_or(default_bar_color);
@@ -795,6 +867,71 @@ impl ChallengeOverlay {
 
         y + font_size + spacing
     }
+}
+
+/// Build `n` sample challenge cards for the move-mode preview so the user
+/// sees real card sizing — including reserved slots — while positioning the
+/// window. Values are static; the normal render path draws them.
+fn sample_challenges(n: usize) -> Vec<ChallengeEntry> {
+    const CARDS: [(&str, f32); 8] = [
+        ("Add Damage", 154.0),
+        ("Orb Healing", 154.0),
+        ("Burn DPS", 62.0),
+        ("Tank Damage Taken", 154.0),
+        ("Kephess Burn", 45.0),
+        ("Tentacle Damage", 90.0),
+        ("Bulwark Damage", 120.0),
+        ("Firebrand Damage", 120.0),
+    ];
+    const PLAYERS: [(&str, f32, &str, &str, Role); 8] = [
+        ("Zas'kel", 1.00, "marauder", "annihilation", Role::Damage),
+        ("Vharowyn", 0.92, "sniper", "virulence", Role::Damage),
+        ("Ondorru", 0.84, "mercenary", "arsenal", Role::Damage),
+        ("Xal-vyr", 0.76, "assassin", "hatred", Role::Damage),
+        ("Miralei", 0.67, "sorcerer", "lightning", Role::Damage),
+        ("Teekay", 0.58, "operative", "medicine", Role::Healer),
+        ("Serapha", 0.49, "sorcerer", "corruption", Role::Healer),
+        ("Brontes'bane", 0.38, "juggernaut", "immortal", Role::Tank),
+    ];
+
+    CARDS
+        .iter()
+        .take(n.clamp(1, CARDS.len()))
+        .enumerate()
+        .map(|(card_idx, &(name, duration))| {
+            let base = 1_850_000.0 * (1.0 - card_idx as f32 * 0.07);
+            let total: f32 = PLAYERS.iter().map(|p| p.1 * base).sum();
+            let by_player = PLAYERS
+                .iter()
+                .enumerate()
+                .map(|(i, &(pname, frac, class, disc, role))| {
+                    let value = (base * frac) as i64;
+                    PlayerContribution {
+                        entity_id: 0,
+                        name: pname.to_string(),
+                        value,
+                        percent: value as f32 / total * 100.0,
+                        per_second: Some(value as f32 / duration),
+                        is_local: i == 1,
+                        class_icon: Some(class.to_string()),
+                        discipline_icon: Some(disc.to_string()),
+                        role: Some(role),
+                    }
+                })
+                .collect::<Vec<_>>();
+            ChallengeEntry {
+                name: name.to_string(),
+                value: total as i64,
+                event_count: 128,
+                per_second: Some(total / duration),
+                by_player,
+                duration_secs: duration,
+                enabled: true,
+                color: None,
+                columns: ChallengeColumns::default(),
+            }
+        })
+        .collect()
 }
 
 /// Truncate `text` to fit within `max_width` at `font_size`, appending `...`

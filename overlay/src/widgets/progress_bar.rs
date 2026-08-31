@@ -7,7 +7,7 @@ use crate::widgets::colors;
 
 /// Lighten a color by blending it toward white
 /// `amount` is 0.0 (no change) to 1.0 (full white)
-fn lighten_color(color: Color, amount: f32) -> Color {
+pub fn lighten_color(color: Color, amount: f32) -> Color {
     let amount = amount.clamp(0.0, 1.0);
     Color::from_rgba(
         color.red() + (1.0 - color.red()) * amount,
@@ -20,7 +20,7 @@ fn lighten_color(color: Color, amount: f32) -> Color {
 
 /// Darken a color by blending it toward black, used as the trailing edge of a
 /// single-color gradient. `amount` is 0.0 (no change) to 1.0 (full black).
-fn darken_color(color: Color, amount: f32) -> Color {
+pub fn darken_color(color: Color, amount: f32) -> Color {
     let factor = 1.0 - amount.clamp(0.0, 1.0);
     Color::from_rgba(
         color.red() * factor,
@@ -29,6 +29,28 @@ fn darken_color(color: Color, amount: f32) -> Color {
         color.alpha(),
     )
     .unwrap_or(color)
+}
+
+/// Draw the placeholder for a reserved icon slot: a square tinted darker than
+/// the paired bar with a small lighter diamond, so icon-less bars read as one
+/// piece with the icon column instead of leaving a hole or a detached gray
+/// block. Shared by every bar layout that reserves an icon column.
+pub fn draw_icon_placeholder(
+    frame: &mut OverlayFrame,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    radius: f32,
+    bar_color: Color,
+) {
+    frame.fill_rounded_rect(x, y, w, h, radius, darken_color(bar_color, 0.5));
+    frame.fill_diamond(
+        x + w / 2.0,
+        y + h / 2.0,
+        w.min(h) * 0.22,
+        lighten_color(bar_color, 0.35),
+    );
 }
 
 /// How much the trailing edge of a gradient fill is darkened relative to the base
@@ -46,10 +68,6 @@ const SEAM_DARKEN: f32 = 0.25;
 /// - Label + right: `| Name              Value |`
 /// - Label + center + right: `| Name    Center   Value |` (3-column, smaller font)
 /// - Label + center: `| Name           Center   |`
-/// Fraction of a bar's height used for an inline icon in bar-mode overlays.
-/// Leaves breathing room above/below so the icon doesn't crowd the bar text.
-pub const BAR_ICON_RATIO: f32 = 0.75;
-
 #[derive(Debug, Clone)]
 pub struct ProgressBar {
     pub label: String,

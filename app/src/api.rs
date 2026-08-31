@@ -98,6 +98,12 @@ pub async fn update_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Start or stop the loopback web overlay and persist the setting.
+pub async fn set_web_overlay_enabled(enabled: bool) -> Result<(), String> {
+    try_invoke("set_web_overlay_enabled", build_args("enabled", &enabled)).await?;
+    Ok(())
+}
+
 /// Whether the app is running in a Wayland session
 pub async fn is_wayland_session() -> bool {
     let result = invoke("is_wayland_session", JsValue::NULL).await;

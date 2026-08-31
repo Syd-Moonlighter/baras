@@ -1443,6 +1443,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: Some("Tanky McTank".to_string()),
+                target_role: Some(baras_core::game_data::Role::Tank),
                 hp_markers: vec![],
                 active_shields: vec![],
                 pushes_at: None,
@@ -1454,6 +1455,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: Some("StabbySith".to_string()),
+                target_role: Some(baras_core::game_data::Role::Dps),
                 hp_markers: vec![],
                 active_shields: vec![],
                 pushes_at: None,
@@ -1465,6 +1467,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: None,
+                target_role: None,
                 hp_markers: vec![],
                 active_shields: vec![],
                 pushes_at: None,
@@ -1478,6 +1481,7 @@ mod examples {
             max: 12_000_000,
             first_seen_at: None,
             target_name: Some("Tanky McTank".to_string()),
+                target_role: Some(baras_core::game_data::Role::Tank),
             hp_markers: vec![],
             active_shields: vec![],
             pushes_at: None,
@@ -1491,6 +1495,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: Some("Shield Wall".to_string()),
+                target_role: None,
                 hp_markers: vec![],
                 active_shields: vec![],
                 pushes_at: None,
@@ -1502,6 +1507,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: Some("Tanky McTank".to_string()),
+                target_role: Some(baras_core::game_data::Role::Tank),
                 hp_markers: vec![],
                 active_shields: vec![],
                 pushes_at: None,
@@ -1518,6 +1524,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: Some("Tanky McTank".to_string()),
+                target_role: Some(baras_core::game_data::Role::Tank),
                 hp_markers: vec![
                     HpMarker {
                         hp_percent: 75.0,
@@ -1552,6 +1559,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: None,
+                target_role: None,
                 hp_markers: vec![],
                 active_shields: vec![ActiveShield {
                     label: "Energy Shield".to_string(),
@@ -1568,6 +1576,7 @@ mod examples {
                 max: 8_000_000,
                 first_seen_at: None,
                 target_name: Some("HealBot".to_string()),
+                target_role: Some(baras_core::game_data::Role::Healer),
                 hp_markers: vec![
                     HpMarker {
                         hp_percent: 60.0,
@@ -1640,6 +1649,8 @@ mod examples {
             let boss_config = BossHealthConfig {
                 show_target: true,
                 dynamic_background: true,
+                // Percent-only readout: HP value toggled off for this row.
+                show_hp_value: false,
                 ..Default::default()
             };
             let window_config = OverlayConfig {
@@ -1706,7 +1717,7 @@ mod examples {
         println!("│     Boss Health - Font Scale + Content-Aware Background      │");
         println!("├─────────────────────────────────────────────────────────────┤");
         println!("│  Row 1: Font scale 1.0x | 1.5x | 2.0x  (3 bosses, 280x200) │");
-        println!("│  Row 2: Content-aware BG with 1 | 2 | 3 bosses (280x300)   │");
+        println!("│  Row 2: Content-aware BG, percent-only readout (280x300)   │");
         println!("│         Background shrinks to fit content height!            │");
         println!("│  Row 3: HP markers + shields (300x350)                      │");
         println!("├─────────────────────────────────────────────────────────────┤");

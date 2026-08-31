@@ -1,37 +1,27 @@
-# v2026.8.23
+# v2026.8.29
 
-## PvP
+## Effects Tracking
 
-- New **Enemy Frames** overlay showing the enemy team's HP, disciplines, and current targets. Enemy players are picked up as they appear in the logs and replaced oldest-first when the roster fills
-- Added **Incoming Damage** overlay showing your DTPS by source for the past 20 seconds.
-- Raid frames will now clear automatically when entering a new PvP instance
-- Improved encounter start/end detection for Arenas and Warzones
-- Metrics overlays now split teams into separate sections
+- Added Effects C and Cooldowns B overlays
+- New option **Show Inactive** shows a greyed-out version of the icon/bar in a stable location on the screen that will fill in when the effect is Inactive. (pair with a 0 duration to track persistent effects such as Guard)
+- Show countdown/stacks and other display options can now be toggled individually per effect instead of per overlay
+- Kolto Shells, Kotlo Probe and Mirror abilities now show stack count at 1
+- Raid frames now has an option to show a colored border that remains as the duration counts down
+- Effects max icon/bar size increased
 
-## Raid Frames
+## Boss HP Bar
 
-- Added a **Clear All** button to the overlay `Rearrange` mode
-- Added an **Effect Horizontal Offset** setting to nudge effect icons left or right
-- Improved auto-assignment text-matching algorithm
-- Reverted raid frame entry text back to white
+- HP bar formatting updated to be more readable.
+- Additional scaling options and toggles have been added
 
-## Effect Modifiers
+## General
 
-- New modifier triggers: **Healing Dealt**, **Killing Blow**, and **Resource Spent** (optionally scaling the duration change by the amount spent)
-- Modifiers can now **cancel** an effect instead of adjusting its duration
-- Modifier ICD can now start from the effect's initial application and be scaled by alacrity
-
-## Other
-
-- Operations timer now auto-starts in Dxun, Gods from the Machine, and R-4 Anomaly relevant difficulties when log events are recorded past the banners
-- Combat log tooltips in the data explorer now show HP
-- Renamed "Prioritize Stacked Effects" to "Emphasize Effect Charges"
-- Improved death recap formatting
-- Icons are now slightly smaller relative to bar height in effect overlays
+- Countdown bars for timers and effects now end at the rightmost edge of the icon instead of the icon obscuring visibility or the bar. Entries without icons are given a place-holder diamond glyph.
 
 ## Bugfixes
 
-- Hotkey input elements now correctly captures key codes instead of output. Numpad keys can now be assigned as hotkeys.
-- Reduced frequency of final boss HP incorrectly displaying as 100% after wipes
-- Fixed issue with Windows taskbar appearing in OCR screen capture
-- Fixed issue with alacrity effect application windows expiring at incorrect time
+- Fixed improper data filtering when double clicking the timeline element to select a phase
+- File selector area badges should now display properly for DE/FR localizations
+- The metrics overlay "max entries" option now selects the top N entries across both teams in PvP zones, instead of the top N on your team
+- Opening files where the final fight ended in a logout/disconnect will no longer trigger live parsing in historical mode
+- DOT tracker bar mode will now use the display text field, if it is present

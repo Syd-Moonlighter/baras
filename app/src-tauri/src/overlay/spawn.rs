@@ -179,11 +179,17 @@ where
                             monitor_y,
                         });
                     }
+                    OverlayCommand::CaptureFrame => {
+                        crate::stream_overlay::capture_overlay(kind, &mut overlay);
+                    }
                     OverlayCommand::DetectRaidNames => {
                         overlay.request_raid_detection();
                         needs_render = true;
                     }
-                    OverlayCommand::Shutdown => return,
+                    OverlayCommand::Shutdown => {
+                        crate::stream_overlay::remove_frame(kind);
+                        return;
+                    }
                 }
             }
 
@@ -225,6 +231,7 @@ where
 
             if needs_render {
                 overlay.render();
+                crate::stream_overlay::capture_overlay(kind, &mut overlay);
                 needs_render = false;
             }
 
@@ -234,6 +241,8 @@ where
             let sleep_ms = if is_interactive { 16 } else { 100 };
             thread::sleep(std::time::Duration::from_millis(sleep_ms));
         }
+
+        crate::stream_overlay::remove_frame(kind);
     });
 
     // Wait for confirmation from the spawned thread
@@ -368,6 +377,12 @@ where
                         });
                         let _ = response_tx.send(event);
                     }
+                    OverlayCommand::CaptureFrame => {
+                        dispatch::Queue::main().exec_sync(move || {
+                            let overlay = unsafe { &mut *overlay_ptr.get() };
+                            crate::stream_overlay::capture_overlay(kind, overlay);
+                        });
+                    }
                     OverlayCommand::DetectRaidNames => {
                         dispatch::Queue::main().exec_sync(move || {
                             let overlay = unsafe { &mut *overlay_ptr.get() };
@@ -376,6 +391,7 @@ where
                         needs_render = true;
                     }
                     OverlayCommand::Shutdown => {
+                        crate::stream_overlay::remove_frame(kind);
                         // Clean up overlay on main thread before returning
                         dispatch::Queue::main().exec_sync(move || {
                             let _ = unsafe { Box::from_raw(overlay_ptr.get()) };
@@ -450,6 +466,7 @@ where
                 dispatch::Queue::main().exec_sync(move || {
                     let overlay = unsafe { &mut *overlay_ptr.get() };
                     overlay.render();
+                    crate::stream_overlay::capture_overlay(kind, overlay);
                 });
                 needs_render = false;
             }
@@ -465,6 +482,7 @@ where
         dispatch::Queue::main().exec_sync(move || {
             let _ = unsafe { Box::from_raw(overlay_ptr.get()) };
         });
+        crate::stream_overlay::remove_frame(kind);
     });
 
     // Wait for confirmation from the spawned thread

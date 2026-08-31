@@ -18,6 +18,7 @@ pub mod overlay;
 mod router;
 pub mod service;
 pub mod state;
+mod stream_overlay;
 mod tray;
 #[cfg(desktop)]
 mod updater;
@@ -122,6 +123,7 @@ pub fn run() {
 
     // Create shared overlay state
     let overlay_state = Arc::new(Mutex::new(OverlayState::default()));
+    let web_overlay_server = stream_overlay::WebOverlayServer::default();
 
     let mut builder = tauri::Builder::default();
 
@@ -151,6 +153,7 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup({
             let overlay_state = overlay_state.clone();
+            let web_overlay_server = web_overlay_server.clone();
             move |app| {
                 // Create channel for overlay updates
                 let (overlay_tx, overlay_rx) = mpsc::channel::<OverlayUpdate>(256);
@@ -172,6 +175,20 @@ pub fn run() {
 
                 // Store the service handle for commands
                 app.handle().manage(handle.clone());
+
+                // Restore the optional web overlay server before native
+                // overlays are auto-shown and publish their first frames.
+                {
+                    let service_handle = handle.clone();
+                    let server = web_overlay_server.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if service_handle.config().await.web_overlay_enabled
+                            && let Err(error) = server.start().await
+                        {
+                            tracing::error!(error = %error, "Failed to restore web overlay server");
+                        }
+                    });
+                }
 
                 // Spawn the overlay update router (needs service handle for registry updates)
                 spawn_overlay_router(
@@ -203,6 +220,7 @@ pub fn run() {
             }
         })
         .manage(overlay_state)
+        .manage(web_overlay_server)
         .manage(updater::PendingUpdate::default())
         .on_window_event(|window, event| {
             // Minimize to tray on close instead of quitting (if enabled)
@@ -243,6 +261,7 @@ pub fn run() {
             commands::get_overlay_status,
             commands::refresh_overlay_settings,
             commands::preview_overlay_settings,
+            commands::set_web_overlay_enabled,
             commands::clear_raid_registry,
             commands::swap_raid_slots,
             commands::remove_raid_slot,

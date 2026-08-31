@@ -520,8 +520,13 @@ impl CombatEncounter {
         }
     }
 
-    /// Get boss health entries for overlay display
-    pub fn get_boss_health(&self) -> Vec<OverlayHealthEntry> {
+    /// Get boss health entries for overlay display. `disciplines` is the
+    /// session-level registry (source of truth for player roles); the
+    /// encounter's own player records are the fallback.
+    pub fn get_boss_health(
+        &self,
+        disciplines: &HashMap<i64, PlayerInfo>,
+    ) -> Vec<OverlayHealthEntry> {
         let Some(def) = self.active_boss_definition() else {
             return Vec::new();
         };
@@ -585,13 +590,16 @@ impl CombatEncounter {
                     .unwrap_or_default();
                 let pushes_at = entity_def.and_then(|e| e.pushes_at);
 
+                let target_player = self.players.get(&npc.current_target_id);
                 OverlayHealthEntry {
                     entity_id: npc.log_id,
                     name: crate::context::resolve(npc.name).to_string(),
-                    target_name: self
-                        .players
+                    target_name: target_player.map(|p| crate::context::resolve(p.name).to_string()),
+                    target_role: disciplines
                         .get(&npc.current_target_id)
-                        .map(|p| crate::context::resolve(p.name).to_string()),
+                        .or(target_player)
+                        .and_then(|p| Discipline::from_guid(p.discipline_id))
+                        .map(|d| d.role()),
                     current: npc.current_hp,
                     max: npc.max_hp,
                     first_seen_at: npc.first_seen_at,

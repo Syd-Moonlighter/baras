@@ -107,6 +107,16 @@ impl OverlayWindow {
         }
     }
 
+    /// Draw a filled diamond centered at (cx, cy)
+    pub fn fill_diamond(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+        let width = self.platform.width();
+        let height = self.platform.height();
+        if let Some(buffer) = self.platform.pixel_buffer() {
+            self.renderer
+                .fill_diamond(buffer, width, height, cx, cy, radius, color);
+        }
+    }
+
     /// Draw a filled rounded rectangle
     pub fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
         let width = self.platform.width();
@@ -114,6 +124,35 @@ impl OverlayWindow {
         if let Some(buffer) = self.platform.pixel_buffer() {
             self.renderer
                 .fill_rounded_rect(buffer, width, height, x, y, w, h, radius, color);
+        }
+    }
+
+    /// Draw a filled rectangle with independent top/bottom corner radii
+    pub fn fill_corner_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top_radius: f32,
+        bottom_radius: f32,
+        color: Color,
+    ) {
+        let width = self.platform.width();
+        let height = self.platform.height();
+        if let Some(buffer) = self.platform.pixel_buffer() {
+            self.renderer.fill_corner_rounded_rect(
+                buffer,
+                width,
+                height,
+                x,
+                y,
+                w,
+                h,
+                top_radius,
+                bottom_radius,
+                color,
+            );
         }
     }
 
@@ -302,6 +341,11 @@ impl OverlayWindow {
     /// Commit the current frame to the screen
     pub fn commit(&mut self) {
         self.platform.commit();
+    }
+
+    /// Copy the final premultiplied RGBA pixels for non-window consumers.
+    pub fn snapshot_rgba(&mut self) -> Option<Vec<u8>> {
+        self.platform.pixel_buffer().map(|pixels| pixels.to_vec())
     }
 
     /// Poll for events (non-blocking)

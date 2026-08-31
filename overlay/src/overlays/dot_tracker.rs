@@ -10,7 +10,7 @@ use super::{Overlay, OverlayConfigUpdate, OverlayData};
 use crate::frame::OverlayFrame;
 use crate::platform::{OverlayConfig, PlatformError};
 use crate::utils::{color_from_rgba, shared_scaled_icons};
-use crate::widgets::{colors, ProgressBar, BAR_ICON_RATIO};
+use crate::widgets::{colors, draw_icon_placeholder, ProgressBar};
 use crate::widgets::Header;
 
 /// A single DOT entry on a target
@@ -183,8 +183,8 @@ impl DotTrackerOverlay {
     fn bar_or_icon_size(&self, bar_layout: bool) -> u32 {
         let icon = self.frame.scaled(self.config.icon_size as f32).round();
         if bar_layout {
-            let bar_height = icon + 4.0 * self.frame.scale_factor();
-            (bar_height * BAR_ICON_RATIO).round() as u32
+            // Bar layout: icon fills the full bar height
+            (icon + 4.0 * self.frame.scale_factor()).round() as u32
         } else {
             icon as u32
         }
@@ -435,7 +435,13 @@ impl DotTrackerOverlay {
                     );
                 }
 
-                // Border
+                // Border; colored squares use the DOT's own color so identity
+                // survives the wipe darkening
+                let border = if has_icon {
+                    colors::white()
+                } else {
+                    color_from_rgba([dot.color[0], dot.color[1], dot.color[2], 255])
+                };
                 self.frame.stroke_rounded_rect(
                     icon_x,
                     y,
@@ -443,7 +449,7 @@ impl DotTrackerOverlay {
                     icon_size,
                     2.0,
                     1.0,
-                    colors::white(),
+                    border,
                 );
 
                 // Font size for countdown text
@@ -516,8 +522,6 @@ impl DotTrackerOverlay {
 
         // Bar height wraps the icon (icon_size = geometry); font_scale = text only
         let bar_height = self.frame.scaled(self.config.icon_size as f32).round() + 4.0 * scale;
-        let icon_size = (bar_height * BAR_ICON_RATIO).round();
-        let icon_padding = ((bar_height - icon_size) / 2.0).round(); // Centered vertically
         let font_size = self.frame.scaled(BASE_BAR_FONT_SIZE * font_scale);
         let name_font_size = font_size * 0.85;
         let entry_spacing = self.frame.scaled(BASE_ROW_SPACING);
@@ -526,7 +530,15 @@ impl DotTrackerOverlay {
         let content_width = self.frame.width() as f32 - 2.0 * padding;
         let header_font_size = font_size * 1.4;
 
-        let icon_size_u32 = icon_size as u32;
+        // Reserved icon column: full bar height, left of every bar. Always
+        // reserved so bars stay aligned whether or not an entry has an icon.
+        // The bar overlaps the icon's right edge by 1px so they read as one
+        // continuous shape under a single outline.
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * scale;
+        let icon_size_u32 = icon_size.round() as u32;
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
 
         let header_space = if self.config.show_header {
             header_font_size + entry_spacing + 2.0 + entry_spacing + 4.0 * scale
@@ -651,13 +663,48 @@ impl DotTrackerOverlay {
                 if self.config.show_countdown {
                     bar = bar.with_right_text(dot.format_time(self.european_number_format));
                 }
+
+                // Draw icon in the reserved column first so the bar's left
+                // edge overlaps its right border; entries without an icon get
+                // the shared tinted placeholder so bars stay aligned.
+                let mut icon_drawn = false;
                 if has_icon {
-                    bar = bar.with_label_offset(icon_size + icon_padding);
+                    if let Some(scaled_icon) =
+                        shared_scaled_icons().get(dot.icon_ability_id, icon_size_u32)
+                    {
+                        self.frame.draw_image(
+                            &scaled_icon,
+                            icon_size_u32,
+                            icon_size_u32,
+                            padding,
+                            y,
+                            icon_size,
+                            icon_size,
+                        );
+                        icon_drawn = true;
+                    } else if let Some(ref icon_arc) = dot.icon {
+                        let (img_w, img_h, ref rgba) = **icon_arc;
+                        self.frame
+                            .draw_image(rgba, img_w, img_h, padding, y, icon_size, icon_size);
+                        icon_drawn = true;
+                    }
+                }
+                if !icon_drawn {
+                    draw_icon_placeholder(
+                        &mut self.frame,
+                        padding,
+                        y,
+                        icon_size,
+                        bar_height,
+                        bar_radius,
+                        color_from_rgba(dot.color),
+                    );
                 }
 
-                bar.render(&mut self.frame, padding, y, content_width, bar_height, font_size, bar_radius);
+                bar.render(&mut self.frame, bar_x, y, bar_width, bar_height, font_size, bar_radius);
 
-                // Per-entry border outline (user-configurable colour, toggleable)
+                // Per-entry border outline (user-configurable colour, toggleable):
+                // one continuous outline around the icon slot + bar.
                 if self.config.show_border {
                     self.frame.stroke_rounded_rect(
                         padding,
@@ -668,58 +715,6 @@ impl DotTrackerOverlay {
                         0.8 * scale,
                         color_from_rgba(self.config.border_color),
                     );
-                }
-
-                // Draw icon with glow border (identical to timer overlay pattern)
-                if has_icon {
-                    let icon_x = padding + icon_padding;
-                    let icon_y = y + icon_padding;
-                    let icon_drawn = if let Some(scaled_icon) =
-                        shared_scaled_icons().get(dot.icon_ability_id, icon_size_u32)
-                    {
-                        self.frame.draw_image(
-                            &scaled_icon,
-                            icon_size_u32,
-                            icon_size_u32,
-                            icon_x,
-                            icon_y,
-                            icon_size,
-                            icon_size,
-                        );
-                        true
-                    } else if let Some(ref icon_arc) = dot.icon {
-                        let (img_w, img_h, ref rgba) = **icon_arc;
-                        self.frame
-                            .draw_image(rgba, img_w, img_h, icon_x, icon_y, icon_size, icon_size);
-                        true
-                    } else {
-                        false
-                    };
-
-                    if icon_drawn {
-                        let icon_radius = 2.0 * scale;
-                        let glow_expand = 1.0 * scale;
-                        let outer_glow = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.25).unwrap();
-                        self.frame.stroke_rounded_rect(
-                            icon_x - glow_expand,
-                            icon_y - glow_expand,
-                            icon_size + glow_expand * 2.0,
-                            icon_size + glow_expand * 2.0,
-                            icon_radius + glow_expand,
-                            1.5 * scale,
-                            outer_glow,
-                        );
-                        let inner_border = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.6).unwrap();
-                        self.frame.stroke_rounded_rect(
-                            icon_x,
-                            icon_y,
-                            icon_size,
-                            icon_size,
-                            icon_radius,
-                            1.0 * scale,
-                            inner_border,
-                        );
-                    }
                 }
 
                 y += bar_height + entry_spacing;
@@ -810,6 +805,22 @@ impl DotTrackerOverlay {
             y += name_line_height;
 
             for (name, time_text, progress) in dots {
+                // Placeholder icon slot (matches render_bar_mode geometry)
+                let icon_size = bar_height;
+                let icon_overlap = 1.0 * scale;
+                let bar_x = padding + icon_size - icon_overlap;
+                let bar_width = content_width - icon_size + icon_overlap;
+
+                draw_icon_placeholder(
+                    &mut self.frame,
+                    padding,
+                    y,
+                    icon_size,
+                    bar_height,
+                    bar_radius,
+                    colors::effect_icon_bg(),
+                );
+
                 let mut bar = ProgressBar::new(*name, *progress)
                     .with_fill_color(colors::effect_icon_bg())
                     .with_bg_color(colors::dps_bar_bg())
@@ -819,7 +830,7 @@ impl DotTrackerOverlay {
                 if self.config.show_countdown {
                     bar = bar.with_right_text(*time_text);
                 }
-                bar.render(&mut self.frame, padding, y, content_width, bar_height, font_size, bar_radius);
+                bar.render(&mut self.frame, bar_x, y, bar_width, bar_height, font_size, bar_radius);
 
                 if self.config.show_border {
                     self.frame.stroke_rounded_rect(

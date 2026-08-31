@@ -376,8 +376,28 @@ impl OverlayFrame {
     }
 
     /// Draw a filled rounded rectangle
+    /// Draw a filled diamond centered at (cx, cy)
+    pub fn fill_diamond(&mut self, cx: f32, cy: f32, radius: f32, color: Color) {
+        self.window.fill_diamond(cx, cy, radius, color);
+    }
+
     pub fn fill_rounded_rect(&mut self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: Color) {
         self.window.fill_rounded_rect(x, y, w, h, radius, color);
+    }
+
+    /// Draw a filled rectangle with independent top/bottom corner radii
+    pub fn fill_corner_rounded_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top_radius: f32,
+        bottom_radius: f32,
+        color: Color,
+    ) {
+        self.window
+            .fill_corner_rounded_rect(x, y, w, h, top_radius, bottom_radius, color);
     }
 
     /// Draw a filled rounded rectangle with a horizontal linear gradient

@@ -15,12 +15,18 @@ pub fn Slider(
     max: f64,
     #[props(default = 1.0)] step: f64,
     #[props(default = "")] suffix: &'static str,
+    #[props(default = "")] tooltip: &'static str,
     #[props(default = false)] disabled: bool,
     on_change: EventHandler<f64>,
 ) -> Element {
     rsx! {
         div { class: "setting-row",
-            label { "{label}" }
+            label {
+                "{label}"
+                if !tooltip.is_empty() {
+                    span { class: "help-icon", title: "{tooltip}", "?" }
+                }
+            }
             input {
                 r#type: "range",
                 min: "{min}",

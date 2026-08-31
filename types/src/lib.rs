@@ -2180,6 +2180,9 @@ pub struct RaidOverlaySettings {
     pub effect_fill_opacity: u8,
     #[serde(default)]
     pub show_effect_icons: bool,
+    /// Outline colored effect squares with the effect's own color
+    #[serde(default)]
+    pub effect_colored_borders: bool,
     #[serde(default = "default_frame_spacing")]
     pub frame_spacing: f32,
 }
@@ -2223,6 +2226,7 @@ impl Default for RaidOverlaySettings {
             show_class_icons: false,
             effect_fill_opacity: 255,
             show_effect_icons: false,
+            effect_colored_borders: false,
             frame_spacing: 4.0,
         }
     }
@@ -2278,9 +2282,31 @@ pub struct BossHealthConfig {
     /// When true, show the current HP value (e.g. "1.90M") inline on the bar
     #[serde(default = "default_true")]
     pub show_hp_value: bool,
+    /// When true, show phase HP markers (line through the bar + gutter label)
+    #[serde(default = "default_true")]
+    pub show_hp_markers: bool,
+    /// When true, show active shields (gutter fill + remaining amount)
+    #[serde(default = "default_true")]
+    pub show_shield: bool,
+    /// When true, show boss-effect icons; their row's space is always
+    /// reserved below each bar so entries never resize when effects land
+    #[serde(default = "default_true")]
+    pub show_icons: bool,
     /// Font scale multiplier (0.3 - 3.0, default 1.0)
     #[serde(default = "default_scaling_factor")]
     pub font_scale: f32,
+    /// Scale multiplier for the lower (gutter) bar: scales its text and,
+    /// more gently, the bar height itself (0.5 - 2.0)
+    #[serde(default = "default_scaling_factor", alias = "target_scale")]
+    pub lower_bar_scale: f32,
+    /// Scale multiplier for the boss-effect icons below the bar (0.5 - 2.0)
+    #[serde(default = "default_scaling_factor")]
+    pub icon_scale: f32,
+    /// How many bosses the window is sized for (1 - 7): entries render at
+    /// window_height / visible_bosses and only compress when more bosses
+    /// than this are alive
+    #[serde(default = "default_visible_bosses")]
+    pub visible_bosses: u32,
     /// When true, background shrinks to fit content instead of filling the window
     #[serde(default)]
     pub dynamic_background: bool,
@@ -2302,6 +2328,10 @@ fn default_boss_bar_color() -> Color {
     overlay_colors::BOSS_BAR
 }
 
+fn default_visible_bosses() -> u32 {
+    4
+}
+
 impl Default for BossHealthConfig {
     fn default() -> Self {
         Self {
@@ -2310,7 +2340,13 @@ impl Default for BossHealthConfig {
             show_percent: true,
             show_target: true,
             show_hp_value: true,
+            show_hp_markers: true,
+            show_shield: true,
+            show_icons: true,
             font_scale: 1.0,
+            lower_bar_scale: 1.0,
+            icon_scale: 1.0,
+            visible_bosses: 4,
             dynamic_background: false,
             clear_after_combat: true,
             show_border: true,
@@ -2515,6 +2551,16 @@ pub struct ChallengeOverlayConfig {
     /// connected, ~0.2 = default. Keeps spacing consistent across resolutions.
     #[serde(default = "default_bar_spacing_ratio")]
     pub bar_spacing_ratio: f32,
+    /// How many challenge cards the window is sized for. 0 = auto (cards
+    /// fill the window). When set, each card takes 1/N of the window width
+    /// (horizontal layout) or height (vertical) and only compresses when
+    /// more than N challenges are visible.
+    #[serde(default)]
+    pub visible_challenges: u8,
+    /// Anchor cards to the far edge of the stacking axis: right edge in
+    /// horizontal layout, bottom edge in vertical.
+    #[serde(default)]
+    pub stack_from_end: bool,
 }
 
 fn default_challenge_bar_color() -> Color {
@@ -2538,6 +2584,8 @@ impl Default for ChallengeOverlayConfig {
             dynamic_background: false,
             bar_gradient: true,
             bar_spacing_ratio: 0.2,
+            visible_challenges: 0,
+            stack_from_end: false,
         }
     }
 }
@@ -3302,6 +3350,11 @@ impl ParselySettings {
 /// Note: Persistence methods (load/save) are provided by baras-core via the
 /// `AppConfigExt` trait, as they require platform-specific dependencies.
 /// The frontend derives Default (getting empty values) which is fine for deserialization.
+// Keep the fixed browser-source URL below Windows' default TCP range
+// (49152-65535), where outbound connections can otherwise claim the port.
+pub const WEB_OVERLAY_PORT: u16 = 47684;
+pub const WEB_OVERLAY_URL: &str = "http://127.0.0.1:47684/overlay";
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -3316,6 +3369,9 @@ pub struct AppConfig {
     pub log_retention_days: u32,
     #[serde(default = "default_true")]
     pub minimize_to_tray: bool,
+    /// Serve the currently visible native overlays on a loopback-only web page.
+    #[serde(default)]
+    pub web_overlay_enabled: bool,
     #[serde(default)]
     pub overlay_settings: OverlaySettings,
     #[serde(default)]
@@ -3407,6 +3463,7 @@ impl AppConfig {
             auto_delete_old_files: false,
             log_retention_days: 21,
             minimize_to_tray: false,
+            web_overlay_enabled: false,
             overlay_settings: OverlaySettings::default(),
             hotkeys: HotkeySettings::default(),
             profiles: Vec::new(),

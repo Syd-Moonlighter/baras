@@ -354,6 +354,47 @@ impl Renderer {
         pixmap.fill_rect(rect, &paint, Transform::identity(), None);
     }
 
+    /// Draw a filled diamond (square rotated 45°) centered at (cx, cy) with
+    /// the given point-to-center radius.
+    pub fn fill_diamond(
+        &self,
+        buffer: &mut [u8],
+        width: u32,
+        height: u32,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        color: Color,
+    ) {
+        if radius <= 0.0 {
+            return;
+        }
+
+        let Some(mut pixmap) = PixmapMut::from_bytes(buffer, width, height) else {
+            return;
+        };
+
+        let mut pb = PathBuilder::new();
+        pb.move_to(cx, cy - radius);
+        pb.line_to(cx + radius, cy);
+        pb.line_to(cx, cy + radius);
+        pb.line_to(cx - radius, cy);
+        pb.close();
+        let Some(path) = pb.finish() else { return };
+
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
     /// Draw a rounded rectangle (filled)
     pub fn fill_rounded_rect(
         &self,
@@ -378,6 +419,49 @@ impl Renderer {
 
         let path = create_rounded_rect_path(x, y, w, h, radius);
         let Some(path) = path else { return };
+
+        let mut paint = Paint::default();
+        paint.set_color(color);
+        paint.anti_alias = true;
+
+        pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    /// Draw a filled rectangle with independent top/bottom corner radii.
+    /// Used for depleting fills inside rounded containers: square top edge
+    /// while partial, so the fill hugs the container's bottom rounding
+    /// without poking past it.
+    pub fn fill_corner_rounded_rect(
+        &self,
+        buffer: &mut [u8],
+        width: u32,
+        height: u32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        top_radius: f32,
+        bottom_radius: f32,
+        color: Color,
+    ) {
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+
+        let Some(mut pixmap) = PixmapMut::from_bytes(buffer, width, height) else {
+            return;
+        };
+
+        let Some(path) = create_corner_rounded_rect_path(x, y, w, h, top_radius, bottom_radius)
+        else {
+            return;
+        };
 
         let mut paint = Paint::default();
         paint.set_color(color);
@@ -753,28 +837,50 @@ impl Default for Renderer {
 
 /// Create a rounded rectangle path
 fn create_rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
-    let r = r.min(w / 2.0).min(h / 2.0);
+    create_corner_rounded_rect_path(x, y, w, h, r, r)
+}
+
+/// Rounded rect path with independent top/bottom corner radii (either may be 0
+/// for square corners on that edge).
+fn create_corner_rounded_rect_path(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    top_r: f32,
+    bottom_r: f32,
+) -> Option<tiny_skia::Path> {
+    let top_r = top_r.min(w / 2.0).min(h / 2.0);
+    let bottom_r = bottom_r.min(w / 2.0).min(h / 2.0);
 
     let mut pb = PathBuilder::new();
 
     // Start at top-left, after the corner
-    pb.move_to(x + r, y);
+    pb.move_to(x + top_r, y);
 
     // Top edge and top-right corner
-    pb.line_to(x + w - r, y);
-    pb.quad_to(x + w, y, x + w, y + r);
+    pb.line_to(x + w - top_r, y);
+    if top_r > 0.0 {
+        pb.quad_to(x + w, y, x + w, y + top_r);
+    }
 
     // Right edge and bottom-right corner
-    pb.line_to(x + w, y + h - r);
-    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.line_to(x + w, y + h - bottom_r);
+    if bottom_r > 0.0 {
+        pb.quad_to(x + w, y + h, x + w - bottom_r, y + h);
+    }
 
     // Bottom edge and bottom-left corner
-    pb.line_to(x + r, y + h);
-    pb.quad_to(x, y + h, x, y + h - r);
+    pb.line_to(x + bottom_r, y + h);
+    if bottom_r > 0.0 {
+        pb.quad_to(x, y + h, x, y + h - bottom_r);
+    }
 
     // Left edge and top-left corner
-    pb.line_to(x, y + r);
-    pb.quad_to(x, y, x + r, y);
+    pb.line_to(x, y + top_r);
+    if top_r > 0.0 {
+        pb.quad_to(x, y, x + top_r, y);
+    }
 
     pb.close();
     pb.finish()

@@ -10,7 +10,7 @@ use super::{Overlay, OverlayConfigUpdate, OverlayData};
 use crate::frame::OverlayFrame;
 use crate::platform::{OverlayConfig, PlatformError};
 use crate::utils::{color_from_rgba, shared_scaled_icons};
-use crate::widgets::{colors, ProgressBar, BAR_ICON_RATIO};
+use crate::widgets::{colors, draw_icon_placeholder, ProgressBar};
 use crate::widgets::Header;
 
 /// Layout direction for effects display
@@ -211,8 +211,8 @@ impl EffectsABOverlay {
     fn bar_or_icon_size(&self, bar_layout: bool) -> u32 {
         let icon = self.frame.scaled(self.config.icon_size as f32).round();
         if bar_layout {
-            let bar_height = icon + 4.0 * self.frame.scale_factor();
-            (bar_height * BAR_ICON_RATIO).round() as u32
+            // Bar layout: icon fills the full bar height
+            (icon + 4.0 * self.frame.scale_factor()).round() as u32
         } else {
             icon as u32
         }
@@ -388,16 +388,7 @@ impl EffectsABOverlay {
 
         for effect in &effects {
             // Draw icon
-            self.draw_icon(effect, x, y, icon_size, icon_size_u32);
-
-            // Border
-            let border = if effect.inactive {
-                color_from_rgba([160, 160, 160, 160])
-            } else {
-                colors::white()
-            };
-            self.frame
-                .stroke_rounded_rect(x, y, icon_size, icon_size, 3.0, 1.0, border);
+            let has_icon = self.draw_icon(effect, x, y, icon_size, icon_size_u32);
 
             // Clock wipe overlay
             let progress = effect.progress();
@@ -411,6 +402,18 @@ impl EffectsABOverlay {
                     color_from_rgba([0, 0, 0, 140]),
                 );
             }
+
+            // Border (after wipe so it stays bright); colored squares use the
+            // effect's own color so identity survives the wipe darkening
+            let border = if effect.inactive {
+                color_from_rgba([160, 160, 160, 160])
+            } else if has_icon {
+                colors::white()
+            } else {
+                color_from_rgba([effect.color[0], effect.color[1], effect.color[2], 255])
+            };
+            self.frame
+                .stroke_rounded_rect(x, y, icon_size, icon_size, 3.0, 1.0, border);
 
             // Stack priority vs normal mode
             if (self.config.stack_priority || effect.stack_priority) && effect.stacks >= 1 {
@@ -580,7 +583,7 @@ impl EffectsABOverlay {
             let x = padding;
 
             // Draw icon
-            self.draw_icon(effect, x, y, icon_size, icon_size_u32);
+            let has_icon = self.draw_icon(effect, x, y, icon_size, icon_size_u32);
 
             // Clock wipe overlay
             let progress = effect.progress();
@@ -595,11 +598,14 @@ impl EffectsABOverlay {
                 );
             }
 
-            // Border
+            // Border; colored squares use the effect's own color so identity
+            // survives the wipe darkening
             let border = if effect.inactive {
                 color_from_rgba([160, 160, 160, 160])
-            } else {
+            } else if has_icon {
                 colors::white()
+            } else {
+                color_from_rgba([effect.color[0], effect.color[1], effect.color[2], 255])
             };
             self.frame
                 .stroke_rounded_rect(x, y, icon_size, icon_size, 3.0, 1.0, border);
@@ -677,8 +683,6 @@ impl EffectsABOverlay {
 
         // Bar height wraps the icon (icon_size = geometry); font_scale = text only
         let bar_height = self.frame.scaled(self.config.icon_size as f32).round() + 4.0 * scale;
-        let icon_size = (bar_height * BAR_ICON_RATIO).round();
-        let icon_padding = ((bar_height - icon_size) / 2.0).round(); // Centered vertically
         let font_size = self.frame.scaled(BASE_BAR_FONT_SIZE * font_scale);
         let entry_spacing = self.frame.scaled(BASE_SPACING);
         let padding = self.frame.scaled(BASE_PADDING);
@@ -686,7 +690,16 @@ impl EffectsABOverlay {
         let content_width = self.frame.width() as f32 - 2.0 * padding;
         let font_color = colors::white();
         let header_font_size = font_size * 1.4;
+
+        // Reserved icon column: full bar height, left of every bar. Always
+        // reserved so bars stay aligned whether or not an entry has an icon.
+        // The bar overlaps the icon's right edge by 1px so they read as one
+        // continuous shape under a single outline.
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * scale;
         let icon_size_u32 = icon_size.round() as u32;
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
 
         let header_space = if self.config.show_header {
             header_font_size + entry_spacing + 2.0 + entry_spacing + 4.0 * scale
@@ -785,29 +798,11 @@ impl EffectsABOverlay {
                 }
                 bar = bar.with_right_text(right);
             }
+            // Draw icon in the reserved column first so the bar's left edge
+            // overlaps its right border; entries without an icon get the
+            // shared tinted placeholder so bars stay aligned.
+            let mut icon_drawn = false;
             if has_icon {
-                bar = bar.with_label_offset(icon_size + icon_padding);
-            }
-
-            bar.render(&mut self.frame, padding, y, content_width, bar_height, font_size, bar_radius);
-
-            // Per-entry border outline (user-configurable colour, toggleable).
-            if self.config.show_border {
-                self.frame.stroke_rounded_rect(
-                    padding,
-                    y,
-                    content_width,
-                    bar_height,
-                    bar_radius,
-                    0.8 * scale,
-                    color_from_rgba(self.config.border_color),
-                );
-            }
-
-            // Draw icon with glow border (identical to timer overlay pattern)
-            if has_icon {
-                let icon_x = padding + icon_padding;
-                let icon_y = y + icon_padding;
                 let scaled_icon = shared_scaled_icons()
                     .get_variant(effect.icon_ability_id, icon_size_u32, effect.inactive)
                     .or_else(|| {
@@ -823,37 +818,19 @@ impl EffectsABOverlay {
                             )
                         })
                     });
-                let icon_drawn = if let Some(scaled_icon) = scaled_icon {
-                    self.frame.draw_image(&scaled_icon, icon_size_u32, icon_size_u32, icon_x, icon_y, icon_size, icon_size);
-                    true
-                } else {
-                    false
-                };
-
-                if icon_drawn {
-                    let icon_radius = 2.0 * scale;
-                    let glow_expand = 1.0 * scale;
-                    let outer_glow = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.25).unwrap();
-                    self.frame.stroke_rounded_rect(
-                        icon_x - glow_expand, icon_y - glow_expand,
-                        icon_size + glow_expand * 2.0, icon_size + glow_expand * 2.0,
-                        icon_radius + glow_expand, 1.5 * scale, outer_glow,
-                    );
-                    let inner_border = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.6).unwrap();
-                    self.frame.stroke_rounded_rect(
-                        icon_x, icon_y, icon_size, icon_size,
-                        icon_radius, 1.0 * scale, inner_border,
-                    );
+                if let Some(scaled_icon) = scaled_icon {
+                    self.frame.draw_image(&scaled_icon, icon_size_u32, icon_size_u32, padding, y, icon_size, icon_size);
+                    icon_drawn = true;
 
                     // Stack count in the bottom-right corner of the icon
                     if effect.stacks >= 1 {
                         let stack_text = format!("{}", effect.stacks);
                         // Sized against the bar, not the icon, so it stays in scale with the label text
                         let stack_font_size = (bar_height - 4.0 * scale) * 0.5;
-                        let stack_x = icon_x + icon_size
+                        let stack_x = padding + icon_size
                             - self.frame.measure_text(&stack_text, stack_font_size).0
                             - 2.0 * scale;
-                        let stack_y = icon_y + icon_size - 3.0 * scale;
+                        let stack_y = y + icon_size - 3.0 * scale;
                         self.frame.draw_text_glowed(
                             &stack_text,
                             stack_x,
@@ -865,13 +842,41 @@ impl EffectsABOverlay {
                 }
             }
 
+            if !icon_drawn {
+                draw_icon_placeholder(
+                    &mut self.frame,
+                    padding,
+                    y,
+                    icon_size,
+                    bar_height,
+                    bar_radius,
+                    bar_color,
+                );
+            }
+
+            bar.render(&mut self.frame, bar_x, y, bar_width, bar_height, font_size, bar_radius);
+
+            // Per-entry border outline (user-configurable colour, toggleable):
+            // one continuous outline around the icon slot + bar.
+            if self.config.show_border {
+                self.frame.stroke_rounded_rect(
+                    padding,
+                    y,
+                    content_width,
+                    bar_height,
+                    bar_radius,
+                    0.8 * scale,
+                    color_from_rgba(self.config.border_color),
+                );
+            }
+
             y += bar_height + entry_spacing;
         }
 
         self.frame.end_frame();
     }
 
-    /// Draw icon or colored square fallback
+    /// Draw icon or colored square fallback; returns whether an icon was drawn
     fn draw_icon(
         &mut self,
         effect: &EffectABEntry,
@@ -879,7 +884,7 @@ impl EffectsABOverlay {
         y: f32,
         icon_size: f32,
         icon_size_u32: u32,
-    ) {
+    ) -> bool {
         let has_icon = if effect.show_icon {
             // On cache miss, scale (and desaturate if inactive) through the cache
             // rather than drawing the raw color RGBA — keeps inactive entries gray.
@@ -926,6 +931,7 @@ impl EffectsABOverlay {
             self.frame
                 .fill_rounded_rect(x, y, icon_size, icon_size, 3.0, bg_color);
         }
+        has_icon
     }
 
     /// Draw stack-priority mode (big stacks centered, timer in corner)
@@ -1291,8 +1297,25 @@ impl EffectsABOverlay {
                 .render(&mut self.frame, padding, header_y, content_width, header_font_size, entry_spacing);
         }
 
+        // Reserved icon column (matches render_bar_mode geometry)
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * scale;
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
+
         let mut y = bars_start_y;
         for (name, time_text, progress) in &previews {
+            // Placeholder icon slot
+            draw_icon_placeholder(
+                &mut self.frame,
+                padding,
+                y,
+                icon_size,
+                bar_height,
+                bar_radius,
+                colors::effect_icon_bg(),
+            );
+
             let mut bar = ProgressBar::new(*name, *progress)
                 .with_fill_color(colors::effect_icon_bg())
                 .with_bg_color(colors::dps_bar_bg())
@@ -1302,7 +1325,7 @@ impl EffectsABOverlay {
             if self.config.show_countdown {
                 bar = bar.with_right_text(*time_text);
             }
-            bar.render(&mut self.frame, padding, y, content_width, bar_height, font_size, bar_radius);
+            bar.render(&mut self.frame, bar_x, y, bar_width, bar_height, font_size, bar_radius);
             y += bar_height + entry_spacing;
         }
 

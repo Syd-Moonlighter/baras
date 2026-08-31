@@ -10,7 +10,7 @@ use super::{Overlay, OverlayConfigUpdate, OverlayData};
 use crate::frame::OverlayFrame;
 use crate::platform::{OverlayConfig, PlatformError};
 use crate::utils::{color_from_rgba, shared_scaled_icons};
-use crate::widgets::{colors, ProgressBar, BAR_ICON_RATIO};
+use crate::widgets::{colors, draw_icon_placeholder, ProgressBar};
 
 /// A single timer entry for display
 #[derive(Debug, Clone)]
@@ -152,7 +152,7 @@ impl TimerOverlay {
     /// Update the data and pre-cache icons at current display size
     pub fn set_data(&mut self, data: TimerData) {
         let bar_height = self.frame.scaled(BASE_BAR_HEIGHT);
-        let icon_size = (bar_height * BAR_ICON_RATIO).round() as u32;
+        let icon_size = bar_height.round() as u32;
 
         let cache = shared_scaled_icons();
         for entry in &data.entries {
@@ -181,6 +181,12 @@ impl TimerOverlay {
         let content_width = width - padding * 2.0;
         let bar_radius = 2.0 * self.frame.scale_factor();
 
+        // Reserved icon column: full bar height, left of every bar
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * self.frame.scale_factor();
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
+
         let previews = [
             ("Mechanic A", "12.3", 0.75_f32),
             ("Mechanic B", "45.0", 0.40_f32),
@@ -197,6 +203,17 @@ impl TimerOverlay {
         };
 
         for (name, time_text, progress) in &previews {
+            // Placeholder icon slot
+            draw_icon_placeholder(
+                &mut self.frame,
+                padding,
+                y,
+                icon_size,
+                bar_height,
+                bar_radius,
+                colors::effect_icon_bg(),
+            );
+
             ProgressBar::new(*name, *progress)
                 .with_fill_color(colors::effect_icon_bg())
                 .with_bg_color(colors::dps_bar_bg())
@@ -206,9 +223,9 @@ impl TimerOverlay {
                 .with_text_glow()
                 .render(
                     &mut self.frame,
-                    padding,
+                    bar_x,
                     y,
-                    content_width,
+                    bar_width,
                     bar_height,
                     font_size,
                     bar_radius,
@@ -302,10 +319,15 @@ impl TimerOverlay {
         let content_width = width - padding * 2.0;
         let bar_radius = 2.0 * self.frame.scale_factor();
 
-        // Icon rendering setup (scale with bar, not text)
-        let icon_size = (bar_height * BAR_ICON_RATIO).round();
-        let icon_padding = ((bar_height - icon_size) / 2.0).round(); // Centered vertically
-        let icon_size_u32 = icon_size as u32;
+        // Reserved icon column: full bar height, left of every bar. Always
+        // reserved so bars stay aligned whether or not an entry has an icon.
+        // The bar overlaps the icon's right edge by 1px so they read as one
+        // continuous shape under a single outline.
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * self.frame.scale_factor();
+        let icon_size_u32 = icon_size.round() as u32;
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
 
         let mut y = bars_start_y;
 
@@ -321,35 +343,62 @@ impl TimerOverlay {
             let bar_color = color_from_rgba(entry.color);
             let time_text = entry.format_time(self.european_number_format);
 
-            // Check if we have an icon to show
-            let has_icon = entry.icon_ability_id.is_some() && entry.icon.is_some();
+            // Draw icon in the reserved column first so the bar's left edge
+            // overlaps its right border; entries without an icon get a filler
+            // square so bars stay aligned with no hole in the row.
+            let mut icon_drawn = false;
+            if let Some(ability_id) = entry.icon_ability_id {
+                if let Some(scaled_icon) = shared_scaled_icons().get(ability_id, icon_size_u32) {
+                    self.frame.draw_image(
+                        &scaled_icon,
+                        icon_size_u32,
+                        icon_size_u32,
+                        padding,
+                        y,
+                        icon_size,
+                        icon_size,
+                    );
+                    icon_drawn = true;
+                } else if let Some(ref icon_arc) = entry.icon {
+                    let (img_w, img_h, ref rgba) = **icon_arc;
+                    self.frame
+                        .draw_image(rgba, img_w, img_h, padding, y, icon_size, icon_size);
+                    icon_drawn = true;
+                }
+            }
+            if !icon_drawn {
+                draw_icon_placeholder(
+                    &mut self.frame,
+                    padding,
+                    y,
+                    icon_size,
+                    bar_height,
+                    bar_radius,
+                    bar_color,
+                );
+            }
 
             // Draw timer bar with name on left, time on right
-            let mut bar = ProgressBar::new(&entry.name, entry.progress())
+            ProgressBar::new(&entry.name, entry.progress())
                 .with_fill_color(bar_color)
                 .with_bg_color(colors::dps_bar_bg())
                 .with_text_color(font_color)
                 .with_right_text(time_text)
                 .with_bold_text()
                 .with_gradient(self.config.bar_gradient)
-                .with_text_glow();
+                .with_text_glow()
+                .render(
+                    &mut self.frame,
+                    bar_x,
+                    y,
+                    bar_width,
+                    bar_height,
+                    font_size,
+                    bar_radius,
+                );
 
-            // Add label offset to make room for icon
-            if has_icon {
-                bar = bar.with_label_offset(icon_size + icon_padding);
-            }
-
-            bar.render(
-                &mut self.frame,
-                padding,
-                y,
-                content_width,
-                bar_height,
-                font_size,
-                bar_radius,
-            );
-
-            // Per-entry border outline (user-configurable colour, toggleable).
+            // Per-entry border outline (user-configurable colour, toggleable):
+            // one continuous outline around the icon slot + bar.
             if self.config.show_border {
                 self.frame.stroke_rounded_rect(
                     padding,
@@ -360,65 +409,6 @@ impl TimerOverlay {
                     0.8 * self.frame.scale_factor(),
                     color_from_rgba(self.config.border_color),
                 );
-            }
-
-            // Draw icon on top of bar if available
-            if has_icon {
-                if let Some(ability_id) = entry.icon_ability_id {
-                    let icon_x = padding + icon_padding;
-                    let icon_y = y + icon_padding;
-                    let icon_drawn = if let Some(scaled_icon) =
-                        shared_scaled_icons().get(ability_id, icon_size_u32)
-                    {
-                        self.frame.draw_image(
-                            &scaled_icon,
-                            icon_size_u32,
-                            icon_size_u32,
-                            icon_x,
-                            icon_y,
-                            icon_size,
-                            icon_size,
-                        );
-                        true
-                    } else if let Some(ref icon_arc) = entry.icon {
-                        let (img_w, img_h, ref rgba) = **icon_arc;
-                        self.frame
-                            .draw_image(rgba, img_w, img_h, icon_x, icon_y, icon_size, icon_size);
-                        true
-                    } else {
-                        false
-                    };
-
-                    // Draw glowing white border around the icon
-                    if icon_drawn {
-                        let icon_radius = 2.0 * self.frame.scale_factor();
-                        let glow_expand = 1.0 * self.frame.scale_factor();
-
-                        // Outer glow: wider, softer white
-                        let outer_glow = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.25).unwrap();
-                        self.frame.stroke_rounded_rect(
-                            icon_x - glow_expand,
-                            icon_y - glow_expand,
-                            icon_size + glow_expand * 2.0,
-                            icon_size + glow_expand * 2.0,
-                            icon_radius + glow_expand,
-                            1.5 * self.frame.scale_factor(),
-                            outer_glow,
-                        );
-
-                        // Inner border: tight, brighter white
-                        let inner_border = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.6).unwrap();
-                        self.frame.stroke_rounded_rect(
-                            icon_x,
-                            icon_y,
-                            icon_size,
-                            icon_size,
-                            icon_radius,
-                            1.0 * self.frame.scale_factor(),
-                            inner_border,
-                        );
-                    }
-                }
             }
 
             y += bar_height + entry_spacing;

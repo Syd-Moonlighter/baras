@@ -146,15 +146,18 @@ pub fn shared_scaled_icons() -> &'static SharedScaledIconCache {
     SHARED_SCALED_ICONS.get_or_init(SharedScaledIconCache::default)
 }
 
-/// Scale icon to target size using nearest-neighbor sampling (shared across overlays)
+/// Scale icon to target size using nearest-neighbor sampling (shared across overlays).
+/// Transparent margins baked into the source art (game icons often carry a
+/// 1-2px empty right/bottom edge) are trimmed so the icon fills the target.
 pub fn scale_icon(src: &[u8], src_w: u32, src_h: u32, target_size: u32) -> Vec<u8> {
+    let (off_x, off_y, crop_w, crop_h) = opaque_bounds(src, src_w, src_h);
     let mut dest = vec![0u8; (target_size * target_size * 4) as usize];
-    let scale_x = src_w as f32 / target_size as f32;
-    let scale_y = src_h as f32 / target_size as f32;
+    let scale_x = crop_w as f32 / target_size as f32;
+    let scale_y = crop_h as f32 / target_size as f32;
     for dy in 0..target_size {
         for dx in 0..target_size {
-            let sx = ((dx as f32 * scale_x) as u32).min(src_w - 1);
-            let sy = ((dy as f32 * scale_y) as u32).min(src_h - 1);
+            let sx = off_x + ((dx as f32 * scale_x) as u32).min(crop_w - 1);
+            let sy = off_y + ((dy as f32 * scale_y) as u32).min(crop_h - 1);
             let src_idx = ((sy * src_w + sx) * 4) as usize;
             let dest_idx = ((dy * target_size + dx) * 4) as usize;
             dest[dest_idx] = src[src_idx];
@@ -164,6 +167,29 @@ pub fn scale_icon(src: &[u8], src_w: u32, src_h: u32, target_size: u32) -> Vec<u
         }
     }
     dest
+}
+
+/// Bounding box (x, y, w, h) of the non-transparent pixels in an RGBA buffer.
+/// Returns the full image if it is entirely transparent.
+fn opaque_bounds(src: &[u8], w: u32, h: u32) -> (u32, u32, u32, u32) {
+    const ALPHA_MIN: u8 = 8;
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (w, h, 0u32, 0u32);
+    let mut found = false;
+    for y in 0..h {
+        for x in 0..w {
+            if src[((y * w + x) * 4 + 3) as usize] >= ALPHA_MIN {
+                min_x = min_x.min(x);
+                min_y = min_y.min(y);
+                max_x = max_x.max(x);
+                max_y = max_y.max(y);
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return (0, 0, w, h);
+    }
+    (min_x, min_y, max_x - min_x + 1, max_y - min_y + 1)
 }
 
 /// Format a large number with K/M suffix for compact display.

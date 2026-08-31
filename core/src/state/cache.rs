@@ -279,7 +279,7 @@ impl SessionCache {
     /// Get current health of all bosses from the current encounter
     pub fn get_boss_health(&self) -> Vec<OverlayHealthEntry> {
         self.current_encounter()
-            .map(|enc| enc.get_boss_health())
+            .map(|enc| enc.get_boss_health(&self.player_disciplines))
             .unwrap_or_default()
     }
 

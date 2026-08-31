@@ -435,6 +435,8 @@ pub struct RaidOverlayConfig {
     pub effect_fill_opacity: u8,
     /// Whether to render effect icons (true) or colored squares (false)
     pub show_effect_icons: bool,
+    /// Outline colored effect squares with the effect's own color
+    pub effect_colored_borders: bool,
     /// Spacing between raid frames in the grid (before scaling)
     /// Clamped to [0.0, 20.0]
     pub frame_spacing: f32,
@@ -453,6 +455,7 @@ impl Default for RaidOverlayConfig {
             effect_horizontal_offset: EFFECT_OFFSET_DEFAULT,
             effect_fill_opacity: 255, // Fully opaque when no icons
             show_effect_icons: false,
+            effect_colored_borders: false,
             frame_spacing: BASE_GAP,
         }
     }
@@ -490,6 +493,7 @@ impl From<baras_core::context::RaidOverlaySettings> for RaidOverlayConfig {
             effect_horizontal_offset: settings.effect_horizontal_offset,
             effect_fill_opacity: settings.effect_fill_opacity,
             show_effect_icons: settings.show_effect_icons,
+            effect_colored_borders: settings.effect_colored_borders,
             frame_spacing: settings.frame_spacing.clamp(0.0, 75.0),
         }
     }
@@ -1448,7 +1452,6 @@ impl RaidOverlay {
         let fill_opacity = self.config.effect_fill_opacity;
         let spacing = effect_size * 0.2;
         let corner_radius = 2.0;
-        let border_width = 1.0;
 
         for (i, effect) in raid_frame.effects.iter().take(max_effects).enumerate() {
             // LEFT side positioning, growing rightward
@@ -1485,11 +1488,10 @@ impl RaidOverlay {
 
                 if fill_percent > 0.0 {
                     // Fill depletes from bottom to top (remaining time shrinks upward)
-                    // Use explicit bottom coordinate to avoid floating-point rounding issues
-                    let max_fill_height = effect_size - border_width * 2.0;
-                    let fill_bottom = ey + effect_size - border_width;
-                    let fill_height = (max_fill_height * fill_percent).round();
-                    let fill_y = fill_bottom - fill_height;
+                    // Flush with the square edges: the border stroke overlaps the
+                    // outer half-pixel, so no dark gap shows between fill and outline
+                    let fill_height = (effect_size * fill_percent).round();
+                    let fill_y = ey + effect_size - fill_height;
 
                     // Combine per-effect alpha (from color) with config opacity
                     // This allows per-effect control while config acts as global multiplier
@@ -1503,13 +1505,21 @@ impl RaidOverlay {
                         combined_alpha,
                     );
 
-                    // Inner fill area (inset by border width)
+                    // Bottom corners follow the square's rounding so no fill pokes
+                    // past it; the top edge stays square while partially depleted
+                    let top_radius = if fill_height >= effect_size.round() {
+                        corner_radius
+                    } else {
+                        0.0
+                    };
                     // Use rounded coordinates to avoid sub-pixel rendering artifacts
-                    self.frame.fill_rect(
-                        (ex + border_width).round(),
+                    self.frame.fill_corner_rounded_rect(
+                        ex.round(),
                         fill_y.round(),
-                        max_fill_height.round(),
+                        effect_size.round(),
                         fill_height,
+                        top_radius,
+                        corner_radius,
                         fill_color,
                     );
                 }
@@ -1529,7 +1539,19 @@ impl RaidOverlay {
                 );
             }
 
-            // Thin border outline for visibility
+            // Thin border outline for visibility; opt-in colored borders use the
+            // effect's own color (full alpha) on squares so identity survives
+            // fill depletion/low opacity
+            let border_color = if !has_icon && self.config.effect_colored_borders {
+                Color::from_rgba8(
+                    (effect.color.red() * 255.0) as u8,
+                    (effect.color.green() * 255.0) as u8,
+                    (effect.color.blue() * 255.0) as u8,
+                    255,
+                )
+            } else {
+                colors::effect_bar_border()
+            };
             self.frame.stroke_rounded_rect(
                 ex,
                 ey,
@@ -1537,7 +1559,7 @@ impl RaidOverlay {
                 effect_size,
                 corner_radius,
                 1.0,
-                colors::effect_bar_border(),
+                border_color,
             );
 
             // Stack count if applicable (centered in the effect square)

@@ -53,6 +53,9 @@ pub struct OverlayHealthEntry {
     pub entity_id: i64,
     pub name: String,
     pub target_name: Option<String>,
+    /// Role of the targeted player (from their discipline), when known
+    #[serde(skip)]
+    pub target_role: Option<crate::game_data::Role>,
     pub current: i32,
     pub max: i32,
     /// Used for sorting by encounter order (not serialized)

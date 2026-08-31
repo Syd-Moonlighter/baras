@@ -9,7 +9,7 @@ use super::{Overlay, OverlayConfigUpdate, OverlayData};
 use crate::frame::OverlayFrame;
 use crate::platform::{OverlayConfig, PlatformError};
 use crate::utils::{color_from_rgba, shared_scaled_icons};
-use crate::widgets::{colors, ProgressBar, BAR_ICON_RATIO};
+use crate::widgets::{colors, draw_icon_placeholder, ProgressBar};
 use crate::widgets::Header;
 
 /// A single cooldown entry for display
@@ -183,8 +183,8 @@ impl CooldownOverlay {
     fn bar_or_icon_size(&self, bar_layout: bool) -> u32 {
         let icon = self.frame.scaled(self.config.icon_size as f32).round();
         if bar_layout {
-            let bar_height = icon + 4.0 * self.frame.scale_factor();
-            (bar_height * BAR_ICON_RATIO).round() as u32
+            // Bar layout: icon fills the full bar height
+            (icon + 4.0 * self.frame.scale_factor()).round() as u32
         } else {
             icon as u32
         }
@@ -662,15 +662,22 @@ impl CooldownOverlay {
 
         // Bar height wraps the icon (icon_size = geometry); font_scale = text only
         let bar_height = self.frame.scaled(self.config.icon_size as f32).round() + 4.0 * scale;
-        let icon_size = (bar_height * BAR_ICON_RATIO).round();
-        let icon_padding = ((bar_height - icon_size) / 2.0).round(); // Centered vertically
         let font_size = self.frame.scaled(BASE_BAR_FONT_SIZE * font_scale);
         let entry_spacing = self.frame.scaled(BASE_ROW_SPACING);
         let padding = self.frame.scaled(BASE_PADDING);
         let bar_radius = 3.0 * scale;
         let content_width = self.frame.width() as f32 - 2.0 * padding;
         let header_font_size = font_size * 1.4;
-        let icon_size_u32 = icon_size as u32;
+
+        // Reserved icon column: full bar height, left of every bar. Always
+        // reserved so bars stay aligned whether or not an entry has an icon.
+        // The bar overlaps the icon's right edge by 1px so they read as one
+        // continuous shape under a single outline.
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * scale;
+        let icon_size_u32 = icon_size.round() as u32;
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
 
         let header_space = if self.config.show_header {
             header_font_size + entry_spacing + 2.0 + entry_spacing + 4.0 * scale
@@ -751,7 +758,7 @@ impl CooldownOverlay {
             let has_icon = entry.show_icon && entry.icon.is_some();
             let bar_color = color_from_rgba(entry.color);
 
-            let mut bar = ProgressBar::new(&label, entry.progress())
+            let bar = ProgressBar::new(&label, entry.progress())
                 .with_fill_color(bar_color)
                 .with_bg_color(colors::dps_bar_bg())
                 .with_text_color(font_color)
@@ -760,19 +767,43 @@ impl CooldownOverlay {
                 .with_gradient(self.config.bar_gradient)
                 .with_text_glow();
 
+            // Draw icon in the reserved column first so the bar's left edge
+            // overlaps its right border; entries without an icon get the
+            // shared tinted placeholder so bars stay aligned with no hole.
+            let mut icon_drawn = false;
             if has_icon {
-                bar = bar.with_label_offset(icon_size + icon_padding);
+                if let Some(scaled) = shared_scaled_icons().get(entry.icon_ability_id, icon_size_u32)
+                {
+                    self.frame.draw_image(&scaled, icon_size_u32, icon_size_u32, padding, y, icon_size, icon_size);
+                    icon_drawn = true;
+                } else if let Some(ref icon_arc) = entry.icon {
+                    let (img_w, img_h, ref rgba) = **icon_arc;
+                    self.frame.draw_image(rgba, img_w, img_h, padding, y, icon_size, icon_size);
+                    icon_drawn = true;
+                }
             }
-
-            bar.render(&mut self.frame, padding, y, content_width, bar_height, font_size, bar_radius);
-
-            // Per-entry border outline (user-configurable colour, toggleable).
-            // Drawn before the ready-state border so the ready highlight wins.
-            if self.config.show_border {
-                self.frame.stroke_rounded_rect(
+            if !icon_drawn {
+                draw_icon_placeholder(
+                    &mut self.frame,
                     padding,
                     y,
-                    content_width,
+                    icon_size,
+                    bar_height,
+                    bar_radius,
+                    bar_color,
+                );
+            }
+
+            bar.render(&mut self.frame, bar_x, y, bar_width, bar_height, font_size, bar_radius);
+
+            // Outline around icon + bar as one continuous shape. Drawn before
+            // the ready-state border so the ready highlight wins.
+            let (outline_x, outline_w) = (padding, content_width);
+            if self.config.show_border {
+                self.frame.stroke_rounded_rect(
+                    outline_x,
+                    y,
+                    outline_w,
                     bar_height,
                     bar_radius,
                     0.8 * scale,
@@ -789,42 +820,7 @@ impl CooldownOverlay {
                     READY_BORDER[3] as f32 / 255.0,
                 )
                 .unwrap_or(tiny_skia::Color::WHITE);
-                self.frame.stroke_rounded_rect(padding, y, content_width, bar_height, bar_radius, 1.5 * scale, c);
-            }
-
-            // Draw icon with glow border
-            if has_icon {
-                let icon_x = padding + icon_padding;
-                let icon_y = y + icon_padding;
-
-                let icon_drawn = if let Some(scaled) =
-                    shared_scaled_icons().get(entry.icon_ability_id, icon_size_u32)
-                {
-                    self.frame.draw_image(&scaled, icon_size_u32, icon_size_u32, icon_x, icon_y, icon_size, icon_size);
-                    true
-                } else if let Some(ref icon_arc) = entry.icon {
-                    let (img_w, img_h, ref rgba) = **icon_arc;
-                    self.frame.draw_image(rgba, img_w, img_h, icon_x, icon_y, icon_size, icon_size);
-                    true
-                } else {
-                    false
-                };
-
-                if icon_drawn {
-                    let icon_radius = 2.0 * scale;
-                    let glow_expand = 1.0 * scale;
-                    let outer_glow = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.25).unwrap();
-                    self.frame.stroke_rounded_rect(
-                        icon_x - glow_expand, icon_y - glow_expand,
-                        icon_size + glow_expand * 2.0, icon_size + glow_expand * 2.0,
-                        icon_radius + glow_expand, 1.5 * scale, outer_glow,
-                    );
-                    let inner_border = tiny_skia::Color::from_rgba(1.0, 1.0, 1.0, 0.6).unwrap();
-                    self.frame.stroke_rounded_rect(
-                        icon_x, icon_y, icon_size, icon_size,
-                        icon_radius, 1.0 * scale, inner_border,
-                    );
-                }
+                self.frame.stroke_rounded_rect(outline_x, y, outline_w, bar_height, bar_radius, 1.5 * scale, c);
             }
 
             y += bar_height + entry_spacing;
@@ -862,7 +858,16 @@ impl CooldownOverlay {
             padding
         };
 
+        // Reserved icon column (matches render_bar_mode geometry)
+        let icon_size = bar_height;
+        let icon_overlap = 1.0 * self.frame.scale_factor();
+        let bar_x = padding + icon_size - icon_overlap;
+        let bar_width = content_width - icon_size + icon_overlap;
+
         for (name, time_text, is_ready) in previews {
+            // Placeholder icon slot
+            draw_icon_placeholder(&mut self.frame, padding, y, icon_size, bar_height, bar_radius, accent);
+
             ProgressBar::new(name, if is_ready { 1.0 } else { 0.4 })
                 .with_fill_color(accent)
                 .with_bg_color(colors::dps_bar_bg())
@@ -870,7 +875,7 @@ impl CooldownOverlay {
                 .with_right_text(time_text)
                 .with_bold_text()
                 .with_text_glow()
-                .render(&mut self.frame, padding, y, content_width, bar_height, font_size, bar_radius);
+                .render(&mut self.frame, bar_x, y, bar_width, bar_height, font_size, bar_radius);
 
             if self.config.show_border {
                 self.frame.stroke_rounded_rect(

@@ -906,6 +906,45 @@ pub fn SettingsPanel(
                                 }
                             }
 
+                            div { class: "setting-row",
+                                label { "Show HP markers" }
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current_settings.boss_health.show_hp_markers,
+                                    onchange: move |e: Event<FormData>| {
+                                        let mut new_settings = draft_settings();
+                                        new_settings.boss_health.show_hp_markers = e.checked();
+                                        update_draft(new_settings);
+                                    }
+                                }
+                            }
+
+                            div { class: "setting-row",
+                                label { "Show shields" }
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current_settings.boss_health.show_shield,
+                                    onchange: move |e: Event<FormData>| {
+                                        let mut new_settings = draft_settings();
+                                        new_settings.boss_health.show_shield = e.checked();
+                                        update_draft(new_settings);
+                                    }
+                                }
+                            }
+
+                            div { class: "setting-row",
+                                label { "Show effect icons" }
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current_settings.boss_health.show_icons,
+                                    onchange: move |e: Event<FormData>| {
+                                        let mut new_settings = draft_settings();
+                                        new_settings.boss_health.show_icons = e.checked();
+                                        update_draft(new_settings);
+                                    }
+                                }
+                            }
+
                     Slider {
                         label: "Font Scale",
                         value: (current_settings.boss_health.font_scale * 100.0) as i32 as f64,
@@ -916,6 +955,46 @@ pub fn SettingsPanel(
                         on_change: move |v: f64| {
                             let mut new_settings = draft_settings();
                             new_settings.boss_health.font_scale = (v as f32 / 100.0).clamp(0.3, 3.0);
+                            update_draft(new_settings);
+                        },
+                    }
+                    Slider {
+                        label: "Lower Bar Scale",
+                        value: (current_settings.boss_health.lower_bar_scale * 100.0) as i32 as f64,
+                        min: 50.0,
+                        max: 200.0,
+                        step: 10.0,
+                        suffix: "%",
+                        on_change: move |v: f64| {
+                            let mut new_settings = draft_settings();
+                            new_settings.boss_health.lower_bar_scale = (v as f32 / 100.0).clamp(0.5, 2.0);
+                            update_draft(new_settings);
+                        },
+                    }
+                    Slider {
+                        label: "Icon Scale",
+                        value: (current_settings.boss_health.icon_scale * 100.0) as i32 as f64,
+                        min: 50.0,
+                        max: 200.0,
+                        step: 10.0,
+                        suffix: "%",
+                        disabled: !current_settings.boss_health.show_icons,
+                        on_change: move |v: f64| {
+                            let mut new_settings = draft_settings();
+                            new_settings.boss_health.icon_scale = (v as f32 / 100.0).clamp(0.5, 2.0);
+                            update_draft(new_settings);
+                        },
+                    }
+                    Slider {
+                        label: "Bosses Sized to Fit",
+                        tooltip: "The number of entries to reserve space for in the overlay window. If this number is exceeded, the entries will be compressed.",
+                        value: current_settings.boss_health.visible_bosses as f64,
+                        min: 1.0,
+                        max: 7.0,
+                        step: 1.0,
+                        on_change: move |v: f64| {
+                            let mut new_settings = draft_settings();
+                            new_settings.boss_health.visible_bosses = (v as u32).clamp(1, 7);
                             update_draft(new_settings);
                         },
                     }
@@ -2825,6 +2904,60 @@ pub fn SettingsPanel(
                                 }
                             }
 
+                            // Reserve space for N challenge cards
+                            div { class: "setting-row",
+                                label {
+                                    title: "The number of challenge cards to reserve space for. Cards keep this fixed size (1/N of the window) instead of stretching to fill it, and only compress when more challenges than this appear.",
+                                    "Sized to Fit"
+                                }
+                                select {
+                                    class: "input-inline",
+                                    onchange: move |e: Event<FormData>| {
+                                        if let Ok(val) = e.value().parse::<u8>() {
+                                            let mut new_settings = draft_settings();
+                                            new_settings.challenge_overlay.visible_challenges = val.min(8);
+                                            update_draft(new_settings);
+                                        }
+                                    },
+                                    option { value: "0", selected: challenge_config.visible_challenges == 0, "Auto (fill window)" }
+                                    for n in 1..=8u8 {
+                                        option { value: "{n}", selected: challenge_config.visible_challenges == n, "{n}" }
+                                    }
+                                }
+                            }
+
+                            // Which edge cards stack from (label follows layout direction)
+                            div { class: "setting-row",
+                                label {
+                                    title: "Which edge challenge cards are anchored to when they don't fill the window.",
+                                    "Stack From"
+                                }
+                                select {
+                                    class: "input-inline",
+                                    onchange: move |e: Event<FormData>| {
+                                        let mut new_settings = draft_settings();
+                                        new_settings.challenge_overlay.stack_from_end = e.value() == "end";
+                                        update_draft(new_settings);
+                                    },
+                                    option {
+                                        value: "start",
+                                        selected: !challenge_config.stack_from_end,
+                                        {match challenge_config.layout {
+                                            ChallengeLayout::Horizontal => "Left",
+                                            ChallengeLayout::Vertical => "Top",
+                                        }}
+                                    }
+                                    option {
+                                        value: "end",
+                                        selected: challenge_config.stack_from_end,
+                                        {match challenge_config.layout {
+                                            ChallengeLayout::Horizontal => "Right",
+                                            ChallengeLayout::Vertical => "Bottom",
+                                        }}
+                                    }
+                                }
+                            }
+
                             h4 { style: "margin-top: 16px;", "Display Options" }
 
                             // Show footer
@@ -3330,6 +3463,20 @@ pub fn SettingsPanel(
                                 }
                             }
                             p { class: "hint", "Display ability icons instead of colored squares (requires icon pack)" }
+
+                            div { class: "setting-row",
+                                label { "Colored Effect Borders" }
+                                input {
+                                    r#type: "checkbox",
+                                    checked: current_settings.raid_overlay.effect_colored_borders,
+                                    onchange: move |e: Event<FormData>| {
+                                        let mut new_settings = draft_settings();
+                                        new_settings.raid_overlay.effect_colored_borders = e.checked();
+                                        update_draft(new_settings);
+                                    }
+                                }
+                            }
+                            p { class: "hint", "Outline colored effect squares with the effect's own color" }
 
                             div { class: "setting-row reset-row",
                                 button {
