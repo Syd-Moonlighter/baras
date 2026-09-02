@@ -2853,7 +2853,7 @@ pub fn App() -> Element {
                         div { class: "screen-capture-content",
                             p { "BARAS needs access to your screen to detect raid-frame names." }
                             p {
-                                "Your desktop doesn't support BARAS's direct capture method. KDE will ask you to choose the monitor where SWTOR is running."
+                                "Your desktop doesn't support BARAS's direct capture method. You will be asked to choose the monitor where SWTOR is running."
                             }
                             div { class: "screen-capture-note",
                                 i { class: "fa-solid fa-shield-halved" }
